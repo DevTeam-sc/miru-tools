@@ -39,6 +39,7 @@ Requirements:
 Controls / overrides:
 
 - `MIRU_AUTO_INSTALL_SERVER=0` disables auto-install.
+- Default assets base URL: `https://github.com/DevTeam-sc/miru-tools/releases/download/v{version}/`
 - `MIRU_ASSETS_BASE_URL` sets the release base URL containing `miru-assets-manifest.json` and binaries.
 - `MIRU_ASSETS_CACHE_DIR` overrides the local download cache directory.
 - `MIRU_ADB` overrides the `adb` executable path.
