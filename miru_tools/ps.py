@@ -14,9 +14,9 @@ def main() -> None:
     except:
         pass
 
-    import frida._frida as _frida
+    import miru._miru as _miru
 
-    from frida_tools.application import ConsoleApplication
+    from miru_tools.application import ConsoleApplication
 
     class PSApplication(ConsoleApplication):
         def _add_options(self, parser: argparse.ArgumentParser) -> None:
@@ -247,7 +247,7 @@ def main() -> None:
                 result += ch
             return result
 
-    def compare_applications(a: _frida.Application, b: _frida.Application) -> int:
+    def compare_applications(a: _miru.Application, b: _miru.Application) -> int:
         a_is_running = a.pid != 0
         b_is_running = b.pid != 0
         if a_is_running == b_is_running:
@@ -262,7 +262,7 @@ def main() -> None:
         else:
             return 1
 
-    def compare_processes(a: _frida.Process, b: _frida.Process) -> int:
+    def compare_processes(a: _miru.Process, b: _miru.Process) -> int:
         a_has_icon = "icons" in a.parameters
         b_has_icon = "icons" in b.parameters
         if a_has_icon == b_has_icon:
@@ -277,7 +277,7 @@ def main() -> None:
         else:
             return 1
 
-    def compute_icon_width(item: Union[_frida.Application, _frida.Process]) -> int:
+    def compute_icon_width(item: Union[_miru.Application, _miru.Process]) -> int:
         for icon in item.parameters.get("icons", []):
             if icon["format"] == "png":
                 return 4

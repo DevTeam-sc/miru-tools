@@ -3,7 +3,7 @@
 import sys
 sys.path.insert(1, '@pythondir@')
 
-import frida_tools.@module@
+import miru_tools.@module@
 
 if __name__ == '__main__':
-    frida_tools.@module@.main()
+    miru_tools.@module@.main()

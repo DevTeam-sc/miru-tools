@@ -1,4 +1,4 @@
-import polyfills from "@frida/rollup-plugin-node-polyfills";
+import polyfills from "@miru/rollup-plugin-node-polyfills";
 import terser from "@rollup/plugin-terser";
 import typescript from "@rollup/plugin-typescript";
 import resolve from "@rollup/plugin-node-resolve";
@@ -23,7 +23,7 @@ export default defineConfig(BRIDGES.map(name => {
              ({
                 name: "disable-treeshake",
                 transform (code, id) {
-                    if (/node_modules\/frida-objc-bridge/.test(id)) {
+                    if (/node_modules\/miru-objc-bridge/.test(id)) {
                         return {
                             code,
                             map: null,

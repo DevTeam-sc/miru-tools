@@ -1,3 +1,4 @@
+/// <reference path="./shims.d.ts" />
 class REPL {
     #quickCommands = new Map();
 
@@ -45,10 +46,10 @@ function registerLazyBridgeGetter(name: string) {
 }
 
 function lazyLoadBridge(name: string): unknown {
-    send({ type: "frida:load-bridge", name });
+    send({ type: "miru:load-bridge", name });
     let bridge: unknown;
-    recv("frida:bridge-loaded", message => {
-        bridge = Script.evaluate(`/frida/bridges/${message.filename}`,
+    recv("miru:bridge-loaded", message => {
+        bridge = Script.evaluate(`/miru/bridges/${message.filename}`,
             "(function () { " + [
                 message.source,
                 `Object.defineProperty(globalThis, '${name}', { value: bridge });`,
@@ -72,21 +73,21 @@ interface QuickCommandHandler {
 }
 
 const rpcExports: RpcExports = {
-    fridaEvaluateExpression(expression: string) {
+    miruEvaluateExpression(expression: string) {
         return evaluate(() => globalThis.eval(expression));
     },
-    fridaEvaluateQuickCommand(tokens: string[]) {
+    miruEvaluateQuickCommand(tokens: string[]) {
         return evaluate(() => repl._invokeQuickCommand(tokens));
     },
-    fridaLoadCmodule(code: string | null, toolchain: CModuleToolchain) {
+    miruLoadCmodule(code: string | null, toolchain: CModuleToolchain) {
         const cs = globalThis.cs;
 
-        if (cs._frida_log === undefined)
-            cs._frida_log = new NativeCallback(onLog, "void", ["pointer"]);
+        if (cs._miru_log === undefined)
+            cs._miru_log = new NativeCallback(onLog, "void", ["pointer"]);
 
         let codeToLoad: string | ArrayBuffer | null = code;
         if (code === null) {
-            recv("frida:cmodule-payload", (message, data) => {
+            recv("miru:cmodule-payload", (message, data) => {
                 codeToLoad = data;
             });
         }

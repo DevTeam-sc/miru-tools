@@ -1,4 +1,4 @@
-import { useR2, type Platform, type Architecture } from "@frida/react-use-r2";
+import { useR2, type Platform, type Architecture } from "@miru/react-use-r2";
 import { OverlayToaster } from "@blueprintjs/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import useWebSocket, { ReadyState } from "react-use-websocket";

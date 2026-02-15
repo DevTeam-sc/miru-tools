@@ -1,5 +1,6 @@
+/// <reference path="./shims.d.ts" />
 import { Buffer } from "buffer";
-import RemoteStreamController, { IncomingStream, Packet } from "frida-remote-stream";
+import RemoteStreamController, { IncomingStream, Packet } from "miru-remote-stream";
 import fs from "fs";
 import fsPath from "path";
 

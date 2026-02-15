@@ -1,3 +1,3 @@
-import Swift from "frida-swift-bridge";
+import Swift from "miru-swift-bridge";
 
 export default Swift;

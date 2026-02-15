@@ -22,4 +22,4 @@ sources = [
   'tracer.py',
 ]
 
-python.install_sources(sources, subdir: 'frida_tools')
+python.install_sources(sources, subdir: 'miru_tools')

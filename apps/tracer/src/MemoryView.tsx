@@ -1,6 +1,6 @@
 import "./MemoryView.css";
 import { Button, ControlGroup, InputGroup, SegmentedControl, Spinner } from "@blueprintjs/core";
-import { useR2 } from "@frida/react-use-r2";
+import { useR2 } from "@miru/react-use-r2";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export interface MemoryViewProps {

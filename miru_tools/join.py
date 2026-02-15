@@ -3,7 +3,7 @@ from typing import Any, List, MutableMapping
 
 
 def main() -> None:
-    from frida_tools.application import ConsoleApplication, await_ctrl_c
+    from miru_tools.application import ConsoleApplication, await_ctrl_c
 
     class JoinApplication(ConsoleApplication):
         def __init__(self) -> None:

@@ -2,15 +2,15 @@ def main() -> None:
     import functools
     import threading
 
-    import frida
+    import miru
     from prompt_toolkit.application import Application
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout.containers import HSplit, VSplit
     from prompt_toolkit.layout.layout import Layout
     from prompt_toolkit.widgets import Label
 
-    from frida_tools.application import ConsoleApplication
-    from frida_tools.reactor import Reactor
+    from miru_tools.application import ConsoleApplication
+    from miru_tools.reactor import Reactor
 
     class LSDApplication(ConsoleApplication):
         def __init__(self) -> None:
@@ -29,7 +29,7 @@ def main() -> None:
 
         def _process_input(self, reactor: Reactor) -> None:
             try:
-                devices = frida.enumerate_devices()
+                devices = miru.enumerate_devices()
             except Exception as e:
                 self._update_status(f"Failed to enumerate devices: {e}")
                 self._exit(1)
@@ -122,7 +122,7 @@ def main() -> None:
 
             self._ui_app.invalidate()
 
-    def compare_devices(a: frida.core.Device, b: frida.core.Device) -> int:
+    def compare_devices(a: miru.core.Device, b: miru.core.Device) -> int:
         a_score = score(a)
         b_score = score(b)
         if a_score == b_score:
@@ -142,7 +142,7 @@ def main() -> None:
             else:
                 return 0
 
-    def score(device: frida.core.Device) -> int:
+    def score(device: miru.core.Device) -> int:
         type = device.type
         if type == "local":
             return 3

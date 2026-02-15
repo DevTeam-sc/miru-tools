@@ -13,13 +13,13 @@ import threading
 import time
 from typing import List, Optional
 
-import frida
+import miru
 from colorama import Style
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.shortcuts import print_formatted_text
 
-from frida_tools.application import ConsoleApplication
-from frida_tools.cli_formatting import THEME_COLOR
+from miru_tools.application import ConsoleApplication
+from miru_tools.cli_formatting import THEME_COLOR
 
 VERSION_COLOR = "#9e9e9e"
 
@@ -40,7 +40,7 @@ class PackageManagerApplication(ConsoleApplication):
         return "%(prog)s [options] <command> [...]"
 
     def _add_options(self, parser: argparse.ArgumentParser) -> None:
-        default_registry = frida.PackageManager().registry
+        default_registry = miru.PackageManager().registry
         parser.add_argument(
             "--registry",
             metavar="HOST",
@@ -65,7 +65,7 @@ class PackageManagerApplication(ConsoleApplication):
             "specs",
             nargs="*",
             metavar="SPEC",
-            help="package spec, e.g. 'frida-objc-bridge@^8.0.5' or 'frida-il2cpp-bridge'",
+            help="package spec, e.g. 'miru-objc-bridge@^8.0.5' or 'miru-il2cpp-bridge'",
         )
         install_p.add_argument(
             "--project-root",
@@ -110,7 +110,7 @@ class PackageManagerApplication(ConsoleApplication):
     ) -> None:
         self._opts = options
 
-        pm = frida.PackageManager()
+        pm = miru.PackageManager()
         if options.registry is not None:
             pm.registry = options.registry
         self._pm = pm

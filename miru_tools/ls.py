@@ -7,7 +7,7 @@ from typing import Any, List
 
 from colorama import Fore, Style
 
-from frida_tools.application import ConsoleApplication
+from miru_tools.application import ConsoleApplication
 
 STYLE_DIR = Fore.BLUE + Style.BRIGHT
 STYLE_EXECUTABLE = Fore.GREEN + Style.BRIGHT

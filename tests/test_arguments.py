@@ -1,7 +1,7 @@
 import unittest
 
-from frida_tools.application import ConsoleApplication
-from frida_tools.kill import KillApplication
+from miru_tools.application import ConsoleApplication
+from miru_tools.kill import KillApplication
 
 
 class DummyConsoleApplication(ConsoleApplication):
@@ -179,3 +179,4 @@ class KillParsingTestCase(unittest.TestCase):
     def test_passing_file(self):
         with self.assertRaises(SystemExit):
             KillApplication(args=["./file"])
+

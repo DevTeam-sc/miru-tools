@@ -1,6 +1,6 @@
 import "./DisassemblyView.css";
 import { DisassemblyTarget, Handler, HandlerId } from "./model.js";
-import { useR2 } from "@frida/react-use-r2";
+import { useR2 } from "@miru/react-use-r2";
 import { hideContextMenu, Menu, MenuItem, showContextMenu, Spinner } from "@blueprintjs/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 

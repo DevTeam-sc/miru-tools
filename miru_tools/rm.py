@@ -6,7 +6,7 @@ from typing import Any, List
 
 from colorama import Fore, Style
 
-from frida_tools.application import ConsoleApplication
+from miru_tools.application import ConsoleApplication
 
 
 def main() -> None:

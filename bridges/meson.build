@@ -23,5 +23,5 @@ custom_target('bridges.bundle',
     '@INPUT@',
   ],
   install: true,
-  install_dir: python.get_install_dir() / 'frida_tools' / 'bridges',
+  install_dir: python.get_install_dir() / 'miru_tools' / 'bridges',
 )

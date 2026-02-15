@@ -13,25 +13,27 @@ in_source_package = pkg_info.exists()
 
 
 def main():
+    version = detect_version()
     setup(
-        name="frida-tools",
-        version=detect_version(),
-        description="Frida CLI tools",
-        long_description="CLI tools for [Frida](https://frida.re).",
+        name="miru-tools",
+        version=version,
+        description="Miru CLI tools",
+        long_description="CLI tools for [Miru](https://miru.re).",
         long_description_content_type="text/markdown",
-        author="Frida Developers",
-        author_email="oleavr@frida.re",
-        url="https://frida.re",
+        author="Miru Developers",
+        author_email="oleavr@miru.re",
+        url="https://miru.re",
+        python_requires=">=3.9",
         install_requires=[
             "colorama >= 0.2.7, < 1.0.0",
-            "frida >= 17.5.0, < 18.0.0",
+            f"miru-core == {version}",
             "prompt-toolkit >= 2.0.0, < 4.0.0",
             "pygments >= 2.0.2, < 3.0.0",
             "websockets >= 13.0.0, < 14.0.0",
         ],
         license="wxWindows Library Licence, Version 3.1",
         zip_safe=False,
-        keywords="frida debugger dynamic instrumentation inject javascript windows macos linux ios iphone ipad android qnx",
+        keywords="miru debugger dynamic instrumentation inject javascript windows macos linux ios iphone ipad android qnx",
         classifiers=[
             "Development Status :: 5 - Production/Stable",
             "Environment :: Console",
@@ -45,36 +47,36 @@ def main():
             "Operating System :: Microsoft :: Windows",
             "Operating System :: POSIX :: Linux",
             "Programming Language :: Python :: 3",
-            "Programming Language :: Python :: 3.7",
-            "Programming Language :: Python :: 3.8",
             "Programming Language :: Python :: 3.9",
             "Programming Language :: Python :: 3.10",
+            "Programming Language :: Python :: 3.11",
+            "Programming Language :: Python :: 3.12",
             "Programming Language :: JavaScript",
             "Topic :: Software Development :: Debuggers",
             "Topic :: Software Development :: Libraries :: Python Modules",
         ],
-        packages=["frida_tools"],
+        packages=["miru_tools"],
         package_data={
-            "frida_tools": fetch_built_assets(),
+            "miru_tools": fetch_built_assets(),
         },
         entry_points={
             "console_scripts": [
-                "frida = frida_tools.repl:main",
-                "frida-ls-devices = frida_tools.lsd:main",
-                "frida-ps = frida_tools.ps:main",
-                "frida-kill = frida_tools.kill:main",
-                "frida-ls = frida_tools.ls:main",
-                "frida-rm = frida_tools.rm:main",
-                "frida-pull = frida_tools.pull:main",
-                "frida-push = frida_tools.push:main",
-                "frida-discover = frida_tools.discoverer:main",
-                "frida-trace = frida_tools.tracer:main",
-                "frida-itrace = frida_tools.itracer:main",
-                "frida-join = frida_tools.join:main",
-                "frida-create = frida_tools.creator:main",
-                "frida-compile = frida_tools.compiler:main",
-                "frida-pm = frida_tools.pm:main",
-                "frida-apk = frida_tools.apk:main",
+                "miru = miru_tools.repl:main",
+                "miru-ls-devices = miru_tools.lsd:main",
+                "miru-ps = miru_tools.ps:main",
+                "miru-kill = miru_tools.kill:main",
+                "miru-ls = miru_tools.ls:main",
+                "miru-rm = miru_tools.rm:main",
+                "miru-pull = miru_tools.pull:main",
+                "miru-push = miru_tools.push:main",
+                "miru-discover = miru_tools.discoverer:main",
+                "miru-trace = miru_tools.tracer:main",
+                "miru-itrace = miru_tools.itracer:main",
+                "miru-join = miru_tools.join:main",
+                "miru-create = miru_tools.creator:main",
+                "miru-compile = miru_tools.compiler:main",
+                "miru-pm = miru_tools.pm:main",
+                "miru-apk = miru_tools.apk:main",
             ]
         },
     )
@@ -87,10 +89,17 @@ def detect_version() -> str:
         ][0].strip()
         version = version_line[9:]
     else:
+        version = os.environ.get("MIRU_VERSION")
+        if version is not None:
+            return version
+
         releng_location = next(enumerate_releng_locations(), None)
         if releng_location is not None:
             sys.path.insert(0, str(releng_location.parent))
-            from releng.frida_version import detect
+            try:
+                from releng.miru_version import detect
+            except ImportError:
+                from releng.frida_version import detect
 
             version = detect(SOURCE_ROOT).name.replace("-dev.", ".dev")
         else:
@@ -99,39 +108,50 @@ def detect_version() -> str:
 
 
 def fetch_built_assets() -> List[str]:
-    assets = []
+    pkgdir = SOURCE_ROOT / "miru_tools"
+    assets = set()
 
-    if in_source_package:
-        pkgdir = SOURCE_ROOT / "frida_tools"
-        assets += [f.name for f in pkgdir.glob("*_agent.js")]
-        assets += [f.relative_to(pkgdir).as_posix() for f in (pkgdir / "bridges").glob("*.js")]
-        assets += [f.name for f in pkgdir.glob("*.zip")]
-    else:
+    # Always include any already-present assets (important for VCS builds where PKG-INFO is absent).
+    assets.update([f.name for f in pkgdir.glob("*_agent.js")])
+    assets.update([f.name for f in pkgdir.glob("*.zip")])
+
+    # Ensure bridges are available in-package at runtime.
+    src_bridges = SOURCE_ROOT / "bridges"
+    bridges_dir = pkgdir / "bridges"
+    if src_bridges.exists():
+        bridges_dir.mkdir(exist_ok=True)
+        for f in src_bridges.glob("*.js"):
+            shutil.copy(f, bridges_dir)
+            assets.add((Path("bridges") / f.name).as_posix())
+
+    if bridges_dir.exists():
+        assets.update([f.relative_to(pkgdir).as_posix() for f in bridges_dir.glob("*.js")])
+
+    if not in_source_package:
         agents_builddir = SOURCE_ROOT / "build" / "agents"
         if agents_builddir.exists():
             for child in agents_builddir.iterdir():
                 if child.is_dir():
                     for f in child.glob("*_agent.js"):
-                        shutil.copy(f, SOURCE_ROOT / "frida_tools")
-                        assets.append(f.name)
+                        shutil.copy(f, pkgdir)
+                        assets.add(f.name)
 
         bridges_builddir = SOURCE_ROOT / "build" / "bridges"
         if bridges_builddir.exists():
-            bridges_dir = SOURCE_ROOT / "frida_tools" / "bridges"
             bridges_dir.mkdir(exist_ok=True)
             for f in bridges_builddir.glob("*.js"):
                 shutil.copy(f, bridges_dir)
-                assets.append((Path("bridges") / f.name).as_posix())
+                assets.add((Path("bridges") / f.name).as_posix())
 
         apps_builddir = SOURCE_ROOT / "build" / "apps"
         if apps_builddir.exists():
             for child in apps_builddir.iterdir():
                 if child.is_dir():
                     for f in child.glob("*.zip"):
-                        shutil.copy(f, SOURCE_ROOT / "frida_tools")
-                        assets.append(f.name)
+                        shutil.copy(f, pkgdir)
+                        assets.add(f.name)
 
-    return assets
+    return sorted(assets)
 
 
 def enumerate_releng_locations() -> Iterator[Path]:
@@ -147,7 +167,7 @@ def enumerate_releng_locations() -> Iterator[Path]:
 
 
 def releng_location_exists(location: Path) -> bool:
-    return (location / "frida_version.py").exists()
+    return (location / "miru_version.py").exists() or (location / "frida_version.py").exists()
 
 
 if __name__ == "__main__":

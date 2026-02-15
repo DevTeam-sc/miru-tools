@@ -1,4 +1,4 @@
-project('frida-tools', 'c',
+project('miru-tools', 'c',
   version: run_command(find_program('python3'), files('setup.py'), '-V',
     capture: true,
     check: true).stdout().strip(),
@@ -19,19 +19,19 @@ endif
 subdir('agents')
 subdir('bridges')
 subdir('apps')
-subdir('frida_tools')
+subdir('miru_tools')
 subdir('scripts')
 subdir('completions')
 
 pathsep = host_machine.system() == 'windows' ? ';' : ':'
 
-test('frida-tools', python,
+test('miru-tools', python,
   args: ['-m', 'unittest', 'discover'],
   workdir: meson.current_source_dir(),
   env: {
     'PYTHONPATH': pathsep.join([
-      meson.current_source_dir() / 'subprojects' / 'frida-python',
-      meson.current_build_dir() / 'subprojects' / 'frida-python' / 'src',
+      meson.current_source_dir() / 'subprojects' / 'miru-python',
+      meson.current_build_dir() / 'subprojects' / 'miru-python' / 'src',
     ]),
   },
   timeout: 30,

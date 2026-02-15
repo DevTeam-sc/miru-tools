@@ -2,11 +2,11 @@ import argparse
 import threading
 from typing import List, Mapping, Optional, Tuple
 
-import frida
+import miru
 
-from frida_tools.application import ConsoleApplication, await_enter
-from frida_tools.model import Function, Module, ModuleFunction
-from frida_tools.reactor import Reactor
+from miru_tools.application import ConsoleApplication, await_enter
+from miru_tools.model import Function, Module, ModuleFunction
+from miru_tools.reactor import Reactor
 
 
 class UI:
@@ -20,7 +20,7 @@ class UI:
     ) -> None:
         pass
 
-    def _on_script_created(self, script: frida.core.Script) -> None:
+    def _on_script_created(self, script: miru.core.Script) -> None:
         pass
 
 
@@ -28,7 +28,7 @@ class Discoverer:
     def __init__(self, reactor: Reactor) -> None:
         self._reactor = reactor
         self._ui = None
-        self._script: Optional[frida.core.Script] = None
+        self._script: Optional[miru.core.Script] = None
 
     def dispose(self) -> None:
         if self._script is not None:
@@ -38,7 +38,7 @@ class Discoverer:
                 pass
             self._script = None
 
-    def start(self, session: frida.core.Session, runtime: str, ui: UI) -> None:
+    def start(self, session: miru.core.Session, runtime: str, ui: UI) -> None:
         def on_message(message, data) -> None:
             print(message, data)
 

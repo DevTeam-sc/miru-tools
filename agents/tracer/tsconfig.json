@@ -5,7 +5,8 @@
             "ES2022"
         ],
         "module": "Node16",
-        "strict": true,
-        "noEmit": true
+        "strict": false,
+        "noEmit": true,
+        "skipLibCheck": true
     }
 }

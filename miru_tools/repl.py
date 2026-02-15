@@ -16,7 +16,7 @@ from timeit import default_timer as timer
 from typing import Any, AnyStr, Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Tuple, TypeVar, Union
 from urllib.request import build_opener
 
-import frida
+import miru
 from colorama import Fore, Style
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
@@ -28,12 +28,116 @@ from prompt_toolkit.styles import Style as PromptToolkitStyle
 from pygments.lexers.javascript import JavascriptLexer
 from pygments.token import Token
 
-from frida_tools import _repl_magic
-from frida_tools.application import ConsoleApplication
-from frida_tools.cli_formatting import THEME_COLOR, format_compiled, format_compiling, format_diagnostic
-from frida_tools.reactor import Reactor
+from miru_tools import _repl_magic
+from miru_tools.application import ConsoleApplication
+from miru_tools.cli_formatting import THEME_COLOR, format_compiled, format_compiling, format_diagnostic
+from miru_tools.reactor import Reactor
 
 T = TypeVar("T")
+
+
+def script_needs_compilation(path: AnyStr) -> bool:
+    if isinstance(path, str):
+        return path.endswith(".ts")
+    return path.endswith(b".ts")
+
+
+def hexdump(src: bytes, length: int = 16) -> str:
+    filter_chars = "".join([(len(repr(chr(x))) == 3) and chr(x) or "." for x in range(256)])
+    lines = []
+    for c in range(0, len(src), length):
+        chars = src[c : c + length]
+        hex_bytes = " ".join(["%02x" % x for x in iter(chars)])
+        printable = "".join(["%s" % ((x <= 127 and filter_chars[x]) or ".") for x in iter(chars)])
+        lines.append("%04x  %-*s  %s\n" % (c, length * 3, hex_bytes, printable))
+    return "".join(lines)
+
+
+OS_BINARY_SIGNATURES = {
+    b"\x4d\x5a",  # PE
+    b"\xca\xfe\xba\xbe",  # Fat Mach-O
+    b"\xcf\xfa\xed\xfe",  # Mach-O
+    b"\x7fELF",  # ELF
+}
+
+
+def code_is_native(code: bytes) -> bool:
+    return (code[:4] in OS_BINARY_SIGNATURES) or (code[:2] in OS_BINARY_SIGNATURES)
+
+
+class JavaScriptError(Exception):
+    def __init__(self, error) -> None:
+        super().__init__(error["message"])
+        self.error = error
+
+
+class DumbStdinReader:
+    def __init__(self, valid_until: Callable[[], bool]) -> None:
+        self._valid_until = valid_until
+
+        self._saw_sigint = False
+        self._prompt: Optional[str] = None
+        self._result: Optional[Tuple[Optional[str], Optional[Exception]]] = None
+        self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
+        self._get_input = input
+
+        worker = threading.Thread(target=self._process_requests, name="stdin-reader")
+        worker.daemon = True
+        worker.start()
+
+        signal.signal(signal.SIGINT, lambda n, f: self._cancel_line())
+
+    def read_line(self, prompt_string: str) -> str:
+        with self._lock:
+            self._prompt = prompt_string
+            self._cond.notify()
+
+        with self._lock:
+            while self._result is None:
+                if self._valid_until():
+                    raise EOFError()
+                self._cond.wait(1)
+            line, error = self._result
+            self._result = None
+
+        if error is not None:
+            raise error
+
+        assert isinstance(line, str)
+        return line
+
+    def _process_requests(self) -> None:
+        error = None
+        while error is None:
+            with self._lock:
+                while self._prompt is None:
+                    self._cond.wait()
+                prompt = self._prompt
+
+            try:
+                line = self._get_input(prompt)
+            except Exception as e:
+                line = None
+                error = e
+
+            with self._lock:
+                self._prompt = None
+                self._result = (line, error)
+                self._cond.notify()
+
+    def _cancel_line(self) -> None:
+        with self._lock:
+            self._saw_sigint = True
+            self._prompt = None
+            self._result = (None, KeyboardInterrupt())
+            self._cond.notify()
+
+
+def start_completion_thread(_repl: "REPLApplication", _epc_port=None) -> None:
+    # Optional upstream feature for completion in non-TTY environments.
+    _, _ = _repl, _epc_port
+    return None
 
 
 class REPLApplication(ConsoleApplication):
@@ -42,11 +146,11 @@ class REPLApplication(ConsoleApplication):
         self._ready = threading.Event()
         self._stopping = threading.Event()
         self._errors = 0
-        self._completer = FridaCompleter(self)
+        self._completer = MiruCompleter(self)
         self._cli = None
         self._last_change_id = 0
         self._compilers: Dict[str, CompilerContext] = {}
-        self._monitored_files: MutableMapping[Union[str, bytes], frida.FileMonitor] = {}
+        self._monitored_files: MutableMapping[Union[str, bytes], miru.FileMonitor] = {}
         self._autoperform = False
         self._autoperform_option = False
         self._autoreload = True
@@ -81,83 +185,99 @@ class REPLApplication(ConsoleApplication):
 
     def _add_options(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
-            "-l", "--load", help="load SCRIPT", metavar="SCRIPT", dest="user_scripts", action="append", default=[]
+            "-l", "--load", help=self._ui("load SCRIPT", "โหลด SCRIPT"), metavar="SCRIPT", dest="user_scripts", action="append", default=[]
         )
         parser.add_argument(
             "-P",
             "--parameters",
-            help="parameters as JSON, same as Gadget",
+            help=self._ui("parameters as JSON, same as Gadget", "พารามิเตอร์แบบ JSON (เหมือน Gadget)"),
             metavar="PARAMETERS_JSON",
             dest="user_parameters",
         )
-        parser.add_argument("-C", "--cmodule", help="load CMODULE", dest="user_cmodule")
+        parser.add_argument("-C", "--cmodule", help=self._ui("load CMODULE", "โหลด CMODULE"), dest="user_cmodule")
         parser.add_argument(
             "--toolchain",
-            help="CModule toolchain to use when compiling from source code",
+            help=self._ui(
+                "CModule toolchain to use when compiling from source code",
+                "toolchain ของ CModule ที่จะใช้เมื่อคอมไพล์จากซอร์สโค้ด",
+            ),
             choices=["any", "internal", "external"],
             default="any",
         )
         parser.add_argument(
-            "-c", "--codeshare", help="load CODESHARE_URI", metavar="CODESHARE_URI", dest="codeshare_uri"
+            "-c", "--codeshare", help=self._ui("load CODESHARE_URI", "โหลด CODESHARE_URI"), metavar="CODESHARE_URI", dest="codeshare_uri"
         )
-        parser.add_argument("-e", "--eval", help="evaluate CODE", metavar="CODE", action="append", dest="eval_items")
+        parser.add_argument("-e", "--eval", help=self._ui("evaluate CODE", "ประเมิน (eval) CODE"), metavar="CODE", action="append", dest="eval_items")
         parser.add_argument(
             "-q",
-            help="quiet mode (no prompt) and quit after -l and -e",
+            help=self._ui("quiet mode (no prompt) and quit after -l and -e", "โหมดเงียบ (ไม่มีพรอมต์) และออกหลังจาก -l และ -e"),
             action="store_true",
             dest="quiet",
             default=False,
         )
         parser.add_argument(
-            "-t", "--timeout", help="seconds to wait before terminating in quiet mode (or 'inf' to run forever)", dest="timeout", default=0
+            "-t",
+            "--timeout",
+            help=self._ui(
+                "seconds to wait before terminating in quiet mode (or 'inf' to run forever)",
+                "จำนวนวินาทีที่จะรอก่อนจบในโหมดเงียบ (หรือ 'inf' เพื่อรันต่อ)",
+            ),
+            dest="timeout",
+            default=0,
         )
         parser.add_argument(
             "--pause",
-            help="leave main thread paused after spawning program",
+            help=self._ui("leave main thread paused after spawning program", "พักเธรดหลักไว้หลังจาก spawn โปรแกรม"),
             action="store_const",
             const="pause",
             dest="on_spawn_complete",
             default="resume",
         )
-        parser.add_argument("-o", "--output", help="output to log file", dest="logfile")
+        parser.add_argument("-o", "--output", help=self._ui("output to log file", "เขียน output ลงไฟล์ log"), dest="logfile")
         parser.add_argument(
             "--eternalize",
-            help="eternalize the script before exit",
+            help=self._ui("eternalize the script before exit", "ทำให้สคริปต์คงอยู่ (eternalize) ก่อนออก"),
             action="store_true",
             dest="eternalize",
             default=False,
         )
         parser.add_argument(
             "--exit-on-error",
-            help="exit with code 1 after encountering any exception in the SCRIPT",
+            help=self._ui(
+                "exit with code 1 after encountering any exception in the SCRIPT",
+                "ออกด้วยโค้ด 1 เมื่อเกิด exception ใน SCRIPT",
+            ),
             action="store_true",
             dest="exit_on_error",
             default=False,
         )
         parser.add_argument(
             "--kill-on-exit",
-            help="kill the spawned program when Frida exits",
+            help=self._ui("kill the spawned program when Miru exits", "ฆ่าโปรแกรมที่ spawn เมื่อ Miru ออก"),
             action="store_true",
             dest="kill_on_exit",
             default=False,
         )
         parser.add_argument(
             "--auto-perform",
-            help="wrap entered code with Java.perform",
+            help=self._ui("wrap entered code with Java.perform", "ครอบโค้ดที่พิมพ์ด้วย Java.perform"),
             action="store_true",
             dest="autoperform",
             default=False,
         )
         parser.add_argument(
             "--auto-reload",
-            help="Enable auto reload of provided scripts and c module (on by default, will be required in the future)",
+            help=self._ui(
+                "Enable auto reload of provided scripts and c module (on by default, will be required in the future)",
+                "เปิด auto reload ของสคริปต์และ c module (เปิดอยู่โดยดีฟอลต์ และอาจบังคับใช้ในอนาคต)",
+            ),
             action="store_true",
             dest="autoreload",
             default=True,
         )
         parser.add_argument(
             "--no-auto-reload",
-            help="Disable auto reload of provided scripts and c module",
+            help=self._ui("Disable auto reload of provided scripts and c module", "ปิด auto reload ของสคริปต์และ c module"),
             action="store_false",
             dest="autoreload",
             default=True,
@@ -213,7 +333,7 @@ class REPLApplication(ConsoleApplication):
             self._logfile.flush()
 
     def _usage(self) -> str:
-        return "%(prog)s [options] target"
+        return self._ui("%(prog)s [options] target", "%(prog)s [ตัวเลือก] เป้าหมาย")
 
     def _needs_target(self) -> bool:
         return True
@@ -241,11 +361,11 @@ class REPLApplication(ConsoleApplication):
                 " ".join(self._spawned_argv) if self._spawned_argv is not None else self._selected_spawn.identifier
             )
             if self._on_spawn_complete == "resume":
-                self._update_status(f"Spawned `{command}`. Resuming main thread!")
+                self._update_status(f"Launched `{command}`. Continuing execution.")
                 self._do_magic("resume")
             else:
                 self._update_status(
-                    "Spawned `{command}`. Use %resume to let the main thread start executing!".format(command=command)
+                    "Launched `{command}`. Main thread paused (run %resume to continue).".format(command=command)
                 )
         else:
             self._clear_status()
@@ -266,7 +386,7 @@ class REPLApplication(ConsoleApplication):
         else:
             self._unload_script()
 
-        with frida.Cancellable():
+        with miru.Cancellable():
             self._demonitor_all()
 
         if self._logfile is not None:
@@ -278,7 +398,7 @@ class REPLApplication(ConsoleApplication):
             self._device.kill(self._spawned_pid)
 
         if not self._quiet:
-            self._print("\nThank you for using Frida!")
+            self._print("\nMiru session ended.")
 
     def _load_script(self) -> None:
         if self._autoreload:
@@ -305,9 +425,9 @@ class REPLApplication(ConsoleApplication):
         if cmodule_code is not None:
             # TODO: Remove this hack once RPC implementation supports passing binary data in both directions.
             if isinstance(cmodule_code, bytes):
-                script.post({"type": "frida:cmodule-payload"}, data=cmodule_code)
+                script.post({"type": "miru:cmodule-payload"}, data=cmodule_code)
                 cmodule_code = None
-            script.exports_sync.frida_load_cmodule(cmodule_code, self._toolchain)
+            script.exports_sync.miru_load_cmodule(cmodule_code, self._toolchain)
 
         stage = "early" if self._target[0] == "file" and is_first_load else "late"
         try:
@@ -351,7 +471,7 @@ class REPLApplication(ConsoleApplication):
         if path is None or path in self._monitored_files or script_needs_compilation(path):
             return
 
-        monitor = frida.FileMonitor(path)
+        monitor = miru.FileMonitor(path)
         monitor.on("change", self._on_change)
         monitor.enable()
         self._monitored_files[path] = monitor
@@ -375,7 +495,7 @@ class REPLApplication(ConsoleApplication):
                 if not reactor.is_running():
                     return
 
-                prompt = f"[{self._prompt_string}]" + "-> " if len(expression) == 0 else "... "
+                prompt = f"miru({self._prompt_string})> " if len(expression) == 0 else ".... "
 
                 pending_eval = self._pending_eval
                 if pending_eval is not None:
@@ -419,10 +539,8 @@ class REPLApplication(ConsoleApplication):
                                 pass
                         return
                     except KeyboardInterrupt:
-                        line = ""
-                        if not self._have_terminal:
-                            sys.stdout.write("\n" + prompt)
-                        continue
+                        self._exit(0)
+                        return
                     if len(line.strip()) > 0:
                         if len(expression) > 0:
                             expression += "\n"
@@ -434,7 +552,7 @@ class REPLApplication(ConsoleApplication):
                 except JavaScriptError as e:
                     error = e.error
                     self._print(Style.BRIGHT + error["name"] + Style.RESET_ALL + ": " + error["message"])
-                except frida.InvalidOperationError:
+                except miru.InvalidOperationError:
                     return
             elif expression == "help":
                 self._do_magic("help")
@@ -451,7 +569,7 @@ class REPLApplication(ConsoleApplication):
                             expression = f"Java.performNow(() => {{ return {expression}\n/**/ }});"
                         if not self._exec_and_print(self._evaluate_expression, expression):
                             self._errors += 1
-                except frida.OperationCancelledError:
+                except miru.OperationCancelledError:
                     return
 
     def _get_confirmation(self, question: str, default_answer: bool = False) -> bool:
@@ -497,27 +615,44 @@ class REPLApplication(ConsoleApplication):
                 trimmed_stack = stack.split("\n")[message_len:-trim_amount]
                 if len(trimmed_stack) > 0:
                     output += "\n" + "\n".join(trimmed_stack)
-        except frida.InvalidOperationError:
+        except miru.InvalidOperationError:
             return success
         if output != "undefined":
             self._print(output)
         return success
 
     def _print_startup_message(self) -> None:
-        self._print(
-            """\
-     ____
-    / _  |   Frida {version} - A world-class dynamic instrumentation toolkit
-   | (_| |
-    > _  |   Commands:
-   /_/ |_|       help      -> Displays the help system
-   . . . .       object?   -> Display information about 'object'
-   . . . .       exit/quit -> Exit
-   . . . .
-   . . . .   More info at https://frida.re/docs/home/""".format(
-                version=frida.__version__
-            )
-        )
+        banner = """\
+  __  __ _                 
+ |  \\/  (_)_ __ _   _      
+ | |\\/| | | '__| | | |     
+ | |  | | | |  | |_| |     
+ |_|  |_|_|_|   \\__,_|     
+"""
+
+        en = """\
+
+  Miru Console
+  Commands:
+    help      -> Show the help system
+    object?   -> Describe 'object'
+    exit/quit -> Exit
+
+  Tip: type %lang to switch EN/TH
+"""
+
+        th = """\
+
+  คอนโซล Miru
+  คำสั่ง:
+    help      -> แสดงระบบช่วยเหลือ
+    object?   -> อธิบาย 'object'
+    exit/quit -> ออก
+
+  ทิป: พิมพ์ %lang เพื่อสลับ EN/TH
+"""
+
+        self._print(banner + self._ui_block(en, th))
 
     def _print_help(self, expression: str) -> None:
         # TODO: Figure out docstrings and implement here. This is real jankaty right now.
@@ -567,6 +702,9 @@ class REPLApplication(ConsoleApplication):
         "exec": _repl_magic.Exec(),
         "time": _repl_magic.Time(),
         "help": _repl_magic.Help(),
+        "lang": _repl_magic.LanguageToggle(),
+        "lang-en": _repl_magic.LanguageSet("en"),
+        "lang-th": _repl_magic.LanguageSet("th"),
     }
 
     def _do_magic(self, statement: str) -> None:
@@ -615,10 +753,15 @@ class REPLApplication(ConsoleApplication):
         self._set_autoperform(state_argument == "on")
 
     def _set_autoperform(self, state: bool) -> None:
-        if self._is_java_available():
-            self._autoperform = state
+        if not state:
+            self._autoperform = False
             self._refresh_prompt()
-        elif state:
+            return
+
+        if self._is_java_available():
+            self._autoperform = True
+            self._refresh_prompt()
+        else:
             self._print("autoperform is only available in Java processes")
 
     def _is_java_available(self) -> bool:
@@ -628,6 +771,7 @@ class REPLApplication(ConsoleApplication):
             script = self._session.create_script(
                 name="java_check", source="rpc.exports.javaAvailable = () => Java.available;", runtime=self._runtime
             )
+            script.set_log_handler(lambda _level, _text: None)
             script.load()
             return script.exports_sync.java_available()
         except:
@@ -655,23 +799,23 @@ class REPLApplication(ConsoleApplication):
 
         suffix = ""
         if self._autoperform:
-            suffix = "(ap)"
+            suffix = " (ap)"
 
         if device_type in ("local", "remote"):
-            prompt_string = "%s::%s %s" % (device_type.title(), target, suffix)
+            prompt_string = f"{device_type}:{target}{suffix}"
         else:
-            prompt_string = "%s::%s %s" % (self._device.name, target, suffix)
+            prompt_string = f"{self._device.name}:{target}{suffix}"
 
         return prompt_string
 
     def _evaluate_expression(self, expression: str) -> Tuple[str, bytes]:
         assert self._script is not None
-        result = self._script.exports_sync.frida_evaluate_expression(expression)
+        result = self._script.exports_sync.miru_evaluate_expression(expression)
         return self._parse_evaluate_result(result)
 
     def _evaluate_quick_command(self, tokens: List[str]) -> Tuple[str, bytes]:
         assert self._script is not None
-        result = self._script.exports_sync.frida_evaluate_quick_command(tokens)
+        result = self._script.exports_sync.miru_evaluate_quick_command(tokens)
         return self._parse_evaluate_result(result)
 
     def _parse_evaluate_result(self, result: Union[bytes, Mapping[Any, Any], Tuple[str, bytes]]) -> Tuple[str, bytes]:
@@ -717,12 +861,12 @@ class REPLApplication(ConsoleApplication):
 
         data_dir = Path(__file__).parent
         raw_fragments.append(
-            (data_dir / "repl_agent.js").read_text(encoding="utf-8").replace("/agent.js", "/frida/repl/agent.js", 1)
+            (data_dir / "repl_agent.js").read_text(encoding="utf-8").replace("/agent.js", "/miru/repl/agent.js", 1)
         )
 
         if self._codeshare_script is not None:
             raw_fragments.append(
-                self._wrap_user_script(f"/codeshare.frida.re/{self._codeshare_uri}.js", self._codeshare_script)
+                self._wrap_user_script(f"/codeshare.miru.re/{self._codeshare_uri}.js", self._codeshare_script)
             )
 
         for user_script in self._user_scripts:
@@ -757,7 +901,7 @@ class REPLApplication(ConsoleApplication):
                 script_id = next_script_id
                 next_script_id += 1
                 size = len(raw_fragment.encode("utf-8"))
-                fragments.append(f"{size} /frida/repl-{script_id}.js\n✄\n{raw_fragment}")
+                fragments.append(f"{size} /miru/repl-{script_id}.js\n✄\n{raw_fragment}")
 
         return "📦\n" + "\n✄\n".join(fragments)
 
@@ -790,16 +934,16 @@ class REPLApplication(ConsoleApplication):
         name = os.path.basename(self._user_cmodule)
 
         return (
-            """static void frida_log (const char * format, ...);\n#line 1 "{name}"\n""".format(name=name)
+            """static void miru_log (const char * format, ...);\n#line 1 "{name}"\n""".format(name=name)
             + source
             + """\
-#line 1 "frida-repl-builtins.c"
+#line 1 "miru-repl-builtins.c"
 #include <glib.h>
 
-extern void _frida_log (const gchar * message);
+extern void _miru_log (const gchar * message);
 
 static void
-frida_log (const char * format,
+miru_log (const char * format,
            ...)
 {
   gchar * message;
@@ -809,7 +953,7 @@ frida_log (const char * format,
   message = g_strdup_vprintf (format, args);
   va_end (args);
 
-  _frida_log (message);
+  _miru_log (message);
 
   g_free (message);
 }
@@ -817,13 +961,19 @@ frida_log (const char * format,
         )
 
     def _load_codeshare_script(self, uri: str) -> Optional[str]:
+        codeshare_base_url = self._get_codeshare_base_url()
+        if codeshare_base_url is None:
+            self._print("Codeshare is disabled by default.")
+            self._print("To enable it, set MIRU_CODESHARE_BASE_URL (example: https://codeshare.example)")
+            return None
+
         trust_store = self._get_or_create_truststore()
 
-        project_url = f"https://codeshare.frida.re/api/project/{uri}/"
+        project_url = f"{codeshare_base_url}/api/project/{uri}/"
         response_json = None
         try:
             request = build_opener()
-            request.addheaders = [("User-Agent", f"Frida v{frida.__version__} | {platform.platform()}")]
+            request.addheaders = [("User-Agent", f"Miru v{miru.__version__} | {platform.platform()}")]
             response = request.open(project_url)
             response_content = response.read().decode("utf-8")
             response_json = json.loads(response_content)
@@ -849,7 +999,7 @@ URL: {url}
                 author="@" + uri.split("/")[0],
                 slug=uri,
                 fingerprint=fingerprint,
-                url=f"https://codeshare.frida.re/@{uri}",
+                url=f"{codeshare_base_url}/@{uri}",
             )
         )
 
@@ -867,6 +1017,15 @@ URL: {url}
             return script
 
         return None
+
+    def _get_codeshare_base_url(self) -> Optional[str]:
+        value = os.environ.get("MIRU_CODESHARE_BASE_URL", "").strip()
+        if value == "":
+            return None
+        if not (value.startswith("http://") or value.startswith("https://")):
+            self._print("Invalid MIRU_CODESHARE_BASE_URL: expected http(s) URL")
+            return None
+        return value.rstrip("/")
 
     def _update_truststore(self, record: Mapping[str, str]) -> None:
         trust_store = self._get_or_create_truststore()
@@ -918,12 +1077,12 @@ URL: {url}
     def _migrate_old_config_file(self, name: str, new_path: str) -> bool:
         xdg_config_home = os.getenv("XDG_CONFIG_HOME")
         if xdg_config_home is not None:
-            old_file = os.path.exists(os.path.join(xdg_config_home, "frida", name))
+            old_file = os.path.exists(os.path.join(xdg_config_home, "miru", name))
             if os.path.isfile(old_file):
                 os.rename(old_file, new_path)
                 return True
 
-        old_file = os.path.join(os.path.expanduser("~"), ".frida", name)
+        old_file = os.path.join(os.path.expanduser("~"), ".miru", name)
         if os.path.isfile(old_file):
             os.rename(old_file, new_path)
             return True
@@ -934,10 +1093,9 @@ URL: {url}
         assert self._device is not None
         if not self._quiet:
             self._print(
-                """\
-   . . . .
-   . . . .   Connected to {device_name} (id={device_id})""".format(
-                    device_id=self._device.id, device_name=self._device.name
+                self._ui(
+                    f"Connected to {self._device.name} (id={self._device.id})",
+                    f"เชื่อมต่อกับ {self._device.name} (id={self._device.id})",
                 )
             )
 
@@ -949,7 +1107,7 @@ class CompilerContext:
         self._autoreload = autoreload
         self._on_bundle_updated = on_bundle_updated
 
-        self.compiler = frida.Compiler()
+        self.compiler = miru.Compiler()
         self._bundle = None
 
     def get_bundle(self) -> str:
@@ -987,7 +1145,7 @@ class CompilerContext:
         return self._bundle
 
 
-class FridaCompleter(Completer):
+class MiruCompleter(Completer):
     def __init__(self, repl: REPLApplication) -> None:
         self._repl = repl
         self._lexer = JavascriptLexer()
@@ -1081,225 +1239,29 @@ class FridaCompleter(Completer):
                     if not self._pattern_matches(before_dot, key) or (key.startswith("_") and before_dot == ""):
                         continue
                     yield Completion(key, -len(before_dot))
-        except frida.InvalidOperationError:
+        except miru.InvalidOperationError:
             pass
-        except frida.OperationCancelledError:
+        except miru.OperationCancelledError:
             pass
         except Exception as e:
             self._repl._print(e)
 
     def _get_keys(self, code):
-        repl = self._repl
-        with repl._reactor.io_cancellable:
-            (t, value) = repl._evaluate_expression(code)
-
-        if t == "error":
-            return []
-
-        return sorted(filter(self._is_valid_name, set(value)))
-
-    def _is_valid_name(self, name) -> bool:
-        tokens = list(self._lexer.get_tokens(name))
-        return len(tokens) == 2 and tokens[0][0] in Token.Name.subtypes
-
-    def _pattern_matches(self, pattern: str, text: str) -> bool:
-        return re.search(re.escape(pattern), text, re.IGNORECASE) is not None
-
-
-def script_needs_compilation(path: AnyStr) -> bool:
-    if isinstance(path, str):
-        return path.endswith(".ts")
-    return path.endswith(b".ts")
-
-
-def hexdump(src, length: int = 16) -> str:
-    FILTER = "".join([(len(repr(chr(x))) == 3) and chr(x) or "." for x in range(256)])
-    lines = []
-    for c in range(0, len(src), length):
-        chars = src[c : c + length]
-        hex = " ".join(["%02x" % x for x in iter(chars)])
-        printable = "".join(["%s" % ((x <= 127 and FILTER[x]) or ".") for x in iter(chars)])
-        lines.append("%04x  %-*s  %s\n" % (c, length * 3, hex, printable))
-    return "".join(lines)
-
-
-OS_BINARY_SIGNATURES = {
-    b"\x4d\x5a",  # PE
-    b"\xca\xfe\xba\xbe",  # Fat Mach-O
-    b"\xcf\xfa\xed\xfe",  # Mach-O
-    b"\x7fELF",  # ELF
-}
-
-
-def code_is_native(code: bytes) -> bool:
-    return (code[:4] in OS_BINARY_SIGNATURES) or (code[:2] in OS_BINARY_SIGNATURES)
-
-
-class JavaScriptError(Exception):
-    def __init__(self, error) -> None:
-        super().__init__(error["message"])
-
-        self.error = error
-
-
-class DumbStdinReader:
-    def __init__(self, valid_until: Callable[[], bool]) -> None:
-        self._valid_until = valid_until
-
-        self._saw_sigint = False
-        self._prompt: Optional[str] = None
-        self._result: Optional[Tuple[Optional[str], Optional[Exception]]] = None
-        self._lock = threading.Lock()
-        self._cond = threading.Condition(self._lock)
-        self._get_input = input
-
-        worker = threading.Thread(target=self._process_requests, name="stdin-reader")
-        worker.daemon = True
-        worker.start()
-
-        signal.signal(signal.SIGINT, lambda n, f: self._cancel_line())
-
-    def read_line(self, prompt_string: str) -> str:
-        with self._lock:
-            self._prompt = prompt_string
-            self._cond.notify()
-
-        with self._lock:
-            while self._result is None:
-                if self._valid_until():
-                    raise EOFError()
-                self._cond.wait(1)
-            line, error = self._result
-            self._result = None
-
-        if error is not None:
-            raise error
-
-        assert isinstance(line, str)
-        return line
-
-    def _process_requests(self) -> None:
-        error = None
-        while error is None:
-            with self._lock:
-                while self._prompt is None:
-                    self._cond.wait()
-                prompt = self._prompt
-
+        # We need to run this in a loop because we might be interrupted by
+        # the user typing more characters while we are evaluating the expression
+        while True:
             try:
-                line = self._get_input(prompt)
-            except Exception as e:
-                line = None
-                error = e
+                (t, value) = self._repl._evaluate_expression(code)
+                if t == "object":
+                    return value
+                return []
+            except miru.OperationCancelledError:
+                return []
+            except Exception:
+                return []
 
-            with self._lock:
-                self._prompt = None
-                self._result = (line, error)
-                self._cond.notify()
-
-    def _cancel_line(self) -> None:
-        with self._lock:
-            self._saw_sigint = True
-            self._prompt = None
-            self._result = (None, KeyboardInterrupt())
-            self._cond.notify()
-
-
-if os.environ.get("TERM", "") == "dumb":
-    try:
-        from collections import namedtuple
-
-        from epc.client import EPCClient
-    except ImportError:
-
-        def start_completion_thread(repl: REPLApplication, epc_port=None) -> None:
-            # Do nothing when we cannot import the EPC module.
-            _, _ = repl, epc_port
-
-    else:
-
-        class EPCCompletionClient(EPCClient):
-            def __init__(self, address="localhost", port=None, *args, **kargs) -> None:
-                if port is not None:
-                    args = ((address, port),) + args
-                EPCClient.__init__(self, *args, **kargs)
-
-                def complete(*cargs, **ckargs):
-                    return self.complete(*cargs, **ckargs)
-
-                self.register_function(complete)
-
-        EpcDocument = namedtuple(
-            "EpcDocument",
-            [
-                "text_before_cursor",
-            ],
-        )
-
-        SYMBOL_CHARS = "._" + string.ascii_letters + string.digits
-        FIRST_SYMBOL_CHARS = "_" + string.ascii_letters
-
-        class ReplEPCCompletion:
-            def __init__(self, repl: "REPLApplication", *args, **kargs) -> None:
-                _, _ = args, kargs
-                self._repl = repl
-
-            def complete(self, *to_complete):
-                to_complete = "".join(to_complete)
-                prefix = ""
-                if len(to_complete) != 0:
-                    for i, x in enumerate(to_complete[::-1]):
-                        if x not in SYMBOL_CHARS:
-                            while i >= 0 and to_complete[-i] not in FIRST_SYMBOL_CHARS:
-                                i -= 1
-                            prefix, to_complete = to_complete[:-i], to_complete[-i:]
-                            break
-                pos = len(prefix)
-                if "." in to_complete:
-                    prefix += to_complete.rsplit(".", 1)[0] + "."
-                try:
-                    completions = self._repl._completer.get_completions(
-                        EpcDocument(text_before_cursor=to_complete), None
-                    )
-                except Exception as ex:
-                    _ = ex
-                    return tuple()
-                completions = [
-                    {
-                        "word": prefix + c.text,
-                        "pos": pos,
-                    }
-                    for c in completions
-                ]
-                return tuple(completions)
-
-        class ReplEPCCompletionClient(EPCCompletionClient, ReplEPCCompletion):
-            def __init__(self, repl, *args, **kargs) -> None:
-                EPCCompletionClient.__init__(self, *args, **kargs)
-                ReplEPCCompletion.__init__(self, repl)
-
-        def start_completion_thread(repl: "REPLApplication", epc_port=None) -> threading.Thread:
-            if epc_port is None:
-                epc_port = os.environ.get("EPC_COMPLETION_SERVER_PORT", None)
-            rpc_complete_thread = None
-            if epc_port is not None:
-                epc_port = int(epc_port)
-                rpc_complete = ReplEPCCompletionClient(repl, port=epc_port)
-                rpc_complete_thread = threading.Thread(
-                    target=rpc_complete.connect,
-                    name="PythonModeEPCCompletion",
-                    kwargs={"socket_or_address": ("localhost", epc_port)},
-                )
-            if rpc_complete_thread is not None:
-                rpc_complete_thread.daemon = True
-                rpc_complete_thread.start()
-                return rpc_complete_thread
-
-else:
-
-    def start_completion_thread(repl: "REPLApplication", epc_port=None) -> None:
-        # Do nothing as completion-epc is not needed when not running in Emacs.
-        _, _ = repl, epc_port
+    def _pattern_matches(self, pattern, key):
+        return key.lower().startswith(pattern.lower())
 
 
 def main() -> None:

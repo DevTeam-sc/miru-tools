@@ -1,0 +1,100 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 16.5.7). Used for manual runs."
+        required: false
+        default: ""
+      publish:
+        description: "Publish to PyPI (requires PYPI_API_TOKEN secret)"
+        required: false
+        default: "false"
+
+jobs:
+  build:
+    name: build (sdist + wheel)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve version
+        id: vars
+        shell: bash
+        env:
+          MANUAL_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${MANUAL_VERSION}" ]]; then
+            echo "version=${MANUAL_VERSION}" >> "$GITHUB_OUTPUT"
+          else
+            ref="${GITHUB_REF_NAME:-v0.0.0}"
+            echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build packages
+        env:
+          MIRU_VERSION: ${{ steps.vars.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip
+          python -m pip install build
+          python -m build
+
+      - name: Smoke test (basic CLI + i18n)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv venv
+          py="venv/bin/python"
+          miru="venv/bin/miru"
+          "$py" -m pip install -U pip
+
+          # This depends on miru-core being published first (see release order).
+          "$py" -m pip install "miru-core==${{ steps.vars.outputs.version }}"
+          "$py" -m pip install dist/miru_tools-*.whl
+
+          "$miru" --AUTO
+          "$miru" --help > /dev/null
+          "$miru" --EN
+          "$miru" --help > /dev/null
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+
+  publish:
+    name: publish (PyPI)
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag' || inputs.publish == 'true'
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: dist
+

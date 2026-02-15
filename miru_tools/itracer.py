@@ -5,10 +5,10 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple, TypeVar, Union
 
-import frida
-from frida.core import RPCException
+import miru
+from miru.core import RPCException
 
-from frida_tools.reactor import Reactor
+from miru_tools.reactor import Reactor
 
 CodeLocation = Union[
     Tuple[str, str],
@@ -35,7 +35,7 @@ def main() -> None:
     from prompt_toolkit.styles import BaseStyle
     from prompt_toolkit.widgets import Label, RadioList
 
-    from frida_tools.application import ConsoleApplication
+    from miru_tools.application import ConsoleApplication
 
     class InstructionTracerApplication(ConsoleApplication, InstructionTracerUI):
         _itracer: Optional[InstructionTracer]
@@ -298,7 +298,7 @@ class InstructionTracerUI(ABC):
     def on_trace_progress(self, total_blocks: int, total_bytes: int) -> None:
         pass
 
-    def _on_script_created(self, script: frida.core.Script) -> None:
+    def _on_script_created(self, script: miru.core.Script) -> None:
         pass
 
 
@@ -310,8 +310,8 @@ class InstructionTracer:
         self._outfile = None
         self._ui: Optional[InstructionTracerUI] = None
         self._total_blocks = 0
-        self._tracer_script: Optional[frida.core.Script] = None
-        self._reader_script: Optional[frida.core.Script] = None
+        self._tracer_script: Optional[miru.core.Script] = None
+        self._reader_script: Optional[miru.core.Script] = None
         self._reader_api = None
 
     def dispose(self) -> None:
@@ -337,7 +337,7 @@ class InstructionTracer:
             self._tracer_script = None
 
     def start(
-        self, device: frida.core.Device, session: frida.core.Session, runtime: str, ui: InstructionTracerUI
+        self, device: miru.core.Device, session: miru.core.Session, runtime: str, ui: InstructionTracerUI
     ) -> None:
         def on_message(message, data) -> None:
             self._reactor.schedule(lambda: self._on_message(message, data))

@@ -7,12 +7,12 @@ import typing
 from threading import Thread
 from typing import Any, AnyStr, List, Mapping, Optional
 
-import frida
+import miru
 from colorama import Fore, Style
 
-from frida_tools.application import ConsoleApplication
-from frida_tools.stream_controller import StreamController
-from frida_tools.units import bytes_to_megabytes
+from miru_tools.application import ConsoleApplication
+from miru_tools.stream_controller import StreamController
+from miru_tools.units import bytes_to_megabytes
 
 
 def main() -> None:
@@ -45,7 +45,7 @@ class PullApplication(ConsoleApplication):
             local_filenames = map(basename_of_unknown_path, self._remote_paths)
             self._local_paths = [os.path.join(local_dir, filename) for filename in local_filenames]
 
-        self._script: Optional[frida.core.Script] = None
+        self._script: Optional[miru.core.Script] = None
         self._stream_controller: Optional[StreamController] = None
         self._total_bytes = 0
         self._time_started: Optional[float] = None

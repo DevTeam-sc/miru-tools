@@ -4,10 +4,10 @@ import sys
 from timeit import default_timer as timer
 from typing import Any, Dict, List, Optional
 
-import frida
+import miru
 
-from frida_tools.application import ConsoleApplication, await_ctrl_c
-from frida_tools.cli_formatting import format_compiled, format_compiling, format_diagnostic, format_error
+from miru_tools.application import ConsoleApplication, await_ctrl_c
+from miru_tools.cli_formatting import format_compiled, format_compiling, format_diagnostic, format_error
 
 
 def main() -> None:
@@ -46,8 +46,8 @@ class CompilerApplication(ConsoleApplication):
             "-P",
             "--platform",
             help="JavaScript runtime platform",
-            choices=["gum", "browser", "neutral"],
-            default="gum",
+            choices=["mumu", "browser", "neutral"],
+            default="mumu",
         )
         parser.add_argument(
             "-E",
@@ -74,7 +74,7 @@ class CompilerApplication(ConsoleApplication):
             "externals": options.external,
         }
 
-        compiler = frida.Compiler()
+        compiler = miru.Compiler()
         self._compiler = compiler
 
         def on_compiler_finished() -> None:

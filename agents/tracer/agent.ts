@@ -1,4 +1,5 @@
-import type _Java from "frida-java-bridge";
+/// <reference path="./shims.d.ts" />
+import type _Java from "miru-java-bridge";
 
 const MAX_HANDLERS_PER_REQUEST = 1000;
 
@@ -1020,10 +1021,10 @@ function registerLazyBridgeGetter(name: string) {
 }
 
 function lazyLoadBridge(name: string): unknown {
-    send({ type: "frida:load-bridge", name });
+    send({ type: "miru:load-bridge", name });
     let bridge: unknown;
-    recv("frida:bridge-loaded", message => {
-        bridge = Script.evaluate(`/frida/bridges/${message.filename}`,
+    recv("miru:bridge-loaded", message => {
+        bridge = Script.evaluate(`/miru/bridges/${message.filename}`,
             "(function () { " + [
                 message.source,
                 `Object.defineProperty(globalThis, '${name}', { value: bridge });`,

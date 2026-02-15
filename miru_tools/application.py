@@ -1,12 +1,14 @@
 import argparse
 import codecs
 import errno
+import locale
 import numbers
 import os
 import platform
 import re
 import select
 import shlex
+import shutil
 import signal
 import sys
 import threading
@@ -19,10 +21,11 @@ if platform.system() == "Windows":
     import msvcrt
 
 import colorama
-import frida
-import frida._frida as _frida
+import miru
+import miru._miru as _miru
 
-from frida_tools.reactor import Reactor
+from miru_tools.config import read_setting, write_setting
+from miru_tools.reactor import Reactor
 
 AUX_OPTION_PATTERN = re.compile(r"(.+)=\((string|bool|int)\)(.+)")
 
@@ -30,8 +33,59 @@ T = TypeVar("T")
 TargetType = Union[List[str], re.Pattern, int, str]
 TargetTypeTuple = Tuple[str, TargetType]
 
+UI_LANG_FLAGS = {
+    "--TH": "th",
+    "--EN": "en",
+    "--AUTO": "auto",
+}
+UI_LANG_VALUES = {"en", "th", "both", "auto"}
 
-def input_with_cancellable(cancellable: frida.Cancellable) -> str:
+
+def _get_prog_name() -> str:
+    name = Path(sys.argv[0] or "miru").stem
+    return name or "miru"
+
+
+def _strip_ui_lang_flags(args: List[str]) -> Tuple[List[str], Optional[str]]:
+    requested: Optional[str] = None
+    remaining: List[str] = []
+
+    for arg in args:
+        key = arg.upper()
+        if key in UI_LANG_FLAGS:
+            requested = UI_LANG_FLAGS[key]
+        else:
+            remaining.append(arg)
+
+    return remaining, requested
+
+
+def _get_terminal_columns(default: int = 120) -> int:
+    try:
+        columns = shutil.get_terminal_size(fallback=(default, 25)).columns
+    except Exception:
+        columns = default
+    return max(60, int(columns))
+
+
+class MiruHelpFormatter(argparse.HelpFormatter):
+    def __init__(self, prog: str):
+        width = _get_terminal_columns()
+        max_help_position = min(44, max(24, (width // 2) - 4))
+        super().__init__(prog, max_help_position=max_help_position, width=width)
+
+
+def _sanitize_user_message(message: str) -> str:
+    # Branding-only sanitization for user-facing output; keep legacy/internal
+    # identifiers intact as much as possible.
+    sanitized = message
+    sanitized = re.sub(r"\bfrida-server\b", "miru-server", sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r"(?<![A-Z0-9_])Frida(?![A-Z0-9_])", "Miru", sanitized)
+    sanitized = re.sub(r"(?<![A-Z0-9_])frida(?![A-Z0-9_])", "miru", sanitized)
+    return sanitized
+
+
+def input_with_cancellable(cancellable: miru.Cancellable) -> str:
     if platform.system() == "Windows":
         result = ""
         done = False
@@ -81,7 +135,7 @@ def input_with_cancellable(cancellable: frida.Cancellable) -> str:
 def await_enter(reactor: Reactor) -> None:
     try:
         input_with_cancellable(reactor.ui_cancellable)
-    except frida.OperationCancelledError:
+    except miru.OperationCancelledError:
         pass
     except KeyboardInterrupt:
         print("")
@@ -91,15 +145,15 @@ def await_ctrl_c(reactor: Reactor) -> None:
     while True:
         try:
             input_with_cancellable(reactor.ui_cancellable)
-        except frida.OperationCancelledError:
+        except miru.OperationCancelledError:
             break
         except KeyboardInterrupt:
             break
 
 
-def deserialize_relay(value: str) -> frida.Relay:
+def deserialize_relay(value: str) -> miru.Relay:
     address, username, password, kind = value.split(",")
-    return frida.Relay(address, username, password, kind)
+    return miru.Relay(address, username, password, kind)
 
 
 def create_target_parser(target_type: str) -> Callable[[str], TargetTypeTuple]:
@@ -123,7 +177,7 @@ class ConsoleState:
 
 class ConsoleApplication:
     """
-    ConsoleApplication is the base class for all of Frida tools, which contains
+    ConsoleApplication is the base class for all of Miru tools, which contains
     the common arguments of the tools. Each application can implement one or
     more of several methods that can be inserted inside the flow of the
     application.
@@ -142,6 +196,29 @@ class ConsoleApplication:
         args: Optional[List[str]] = None,
     ):
         plain_terminal = os.environ.get("TERM", "").lower() == "none"
+        raw_args = sys.argv[1:] if args is None else list(args)
+        filtered_args, requested_ui_lang = _strip_ui_lang_flags(raw_args)
+
+        env_ui_lang = os.environ.get("MIRU_UI_LANG")
+        if requested_ui_lang is not None:
+            write_setting("ui_lang", requested_ui_lang)
+            if env_ui_lang is None:
+                os.environ["MIRU_UI_LANG"] = requested_ui_lang
+
+            if len(filtered_args) == 0:
+                prog = _get_prog_name()
+                print(f"{prog}: UI language saved: {requested_ui_lang}")
+                raise SystemExit(0)
+        elif env_ui_lang is None:
+            persisted = read_setting("ui_lang")
+            persisted_norm = persisted.strip().lower() if persisted else None
+            if persisted_norm in UI_LANG_VALUES:
+                os.environ["MIRU_UI_LANG"] = persisted_norm
+            else:
+                os.environ["MIRU_UI_LANG"] = "auto"
+
+        self._ui_lang = self._select_ui_language(os.environ.get("MIRU_UI_LANG"))
+        self._enable_unicode_output()
 
         # Windows doesn't have SIGPIPE
         if hasattr(signal, "SIGPIPE"):
@@ -153,7 +230,7 @@ class ConsoleApplication:
         colorama.init(strip=True if no_color else None)
 
         parser = self._initialize_arguments_parser()
-        real_args = compute_real_args(parser, args=args)
+        real_args = compute_real_args(parser, args=filtered_args)
         options = parser.parse_args(real_args)
 
         # handle scripts that don't need a target
@@ -164,14 +241,14 @@ class ConsoleApplication:
         self._initialize_target_arguments(parser, options)
 
         self._reactor = Reactor(run_until_return, on_stop)
-        self._device: Optional[frida.core.Device] = None
+        self._device: Optional[miru.core.Device] = None
         self._schedule_on_output = lambda pid, fd, data: self._reactor.schedule(lambda: self._on_output(pid, fd, data))
         self._schedule_on_device_lost = lambda: self._reactor.schedule(self._on_device_lost)
         self._spawned_pid: Optional[int] = None
         self._spawned_argv = None
-        self._selected_spawn: Optional[_frida.Spawn] = None
+        self._selected_spawn: Optional[_miru.Spawn] = None
         self._target_pid: Optional[int] = None
-        self._session: Optional[frida.core.Session] = None
+        self._session: Optional[miru.core.Session] = None
         self._schedule_on_session_detached = lambda reason, crash: self._reactor.schedule(
             lambda: self._on_session_detached(reason, crash)
         )
@@ -182,8 +259,16 @@ class ConsoleApplication:
         self._have_terminal = sys.stdin.isatty() and sys.stdout.isatty() and not os.environ.get("TERM", "") == "dumb"
         self._plain_terminal = plain_terminal
         self._quiet = False
+        self._java_bridge_in_progress = False
+        self._java_bridge_last_done_at = 0.0
+        self._auto_install_attempted = False
         if sum(map(lambda v: int(v is not None), (self._device_id, self._device_type, self._host))) > 1:
-            parser.error("Only one of -D, -U, -R, and -H may be specified")
+            parser.error(
+                self._ui(
+                    "Only one of -D, -U, -R, and -H may be specified",
+                    "ระบุได้อย่างมาก 1 ตัวเลือกจาก -D, -U, -R และ -H เท่านั้น",
+                )
+            )
 
         self._initialize_target(parser, options)
 
@@ -192,18 +277,101 @@ class ConsoleApplication:
         except Exception as e:
             parser.error(str(e))
 
+    def _select_ui_language(self, raw_value: Optional[str]) -> str:
+        """
+        User-surface language selector for CLI output.
+
+        Supported values:
+          - MIRU_UI_LANG=en   (English)
+          - MIRU_UI_LANG=th   (Thai)
+          - MIRU_UI_LANG=both (English + Thai)
+          - MIRU_UI_LANG=auto (Thai-first default)
+        """
+
+        value = (raw_value or "").strip().lower()
+
+        # Thai-first defaults (as requested).
+        if value in ("", "default", "auto"):
+            return "th"
+
+        if value in ("en", "english", "en-us", "en_us"):
+            return "en"
+        if value in ("th", "thai", "th-th", "th_th"):
+            return "th"
+        if value in ("both", "bilingual", "two", "2", "en+th", "th+en"):
+            return "both"
+
+        return "th"
+
+    def _ui(self, en: str, th: str) -> str:
+        lang = getattr(self, "_ui_lang", "th")
+        if lang == "both":
+            return f"{en} / {th}"
+        if lang == "en":
+            return en
+        return th
+
+    def _ui_block(self, en: str, th: str) -> str:
+        lang = getattr(self, "_ui_lang", "th")
+        if lang == "both":
+            return en.rstrip("\n") + "\n\n" + th.lstrip("\n")
+        if lang == "en":
+            return en
+        return th
+
+    def _enable_unicode_output(self) -> None:
+        if platform.system() != "Windows":
+            return
+        if getattr(self, "_ui_lang", "en") == "en":
+            return
+
+        enc = (sys.stdout.encoding or "").lower()
+        if enc in ("utf-8", "utf8", "cp65001", "cp874"):
+            return
+
+        if sys.stdout.isatty() and sys.stderr.isatty():
+            try:
+                os.system("chcp 65001 >NUL")
+            except Exception:
+                pass
+
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                if hasattr(stream, "reconfigure"):
+                    stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                try:
+                    if hasattr(stream, "reconfigure"):
+                        stream.reconfigure(errors="replace")
+                except Exception:
+                    pass
+
+    def _stdout_supports_unicode(self) -> bool:
+        enc = (sys.stdout.encoding or "").lower()
+        return enc in ("utf-8", "utf8", "cp65001")
+
+    def _encode_for_stdout(self, text: str) -> str:
+        if self._stdout_supports_unicode():
+            return text
+
+        encoding = sys.stdout.encoding or "UTF-8"
+        try:
+            return text.encode(encoding, errors="backslashreplace").decode(encoding)
+        except LookupError:
+            return text.encode("utf-8", errors="backslashreplace").decode("utf-8")
+
     def _initialize_device_arguments(self, parser: argparse.ArgumentParser, options: argparse.Namespace) -> None:
         if self._needs_device():
             self._device_id = options.device_id
             self._device_type = options.device_type
             self._host = options.host
             if all([x is None for x in [self._device_id, self._device_type, self._host]]):
-                self._device_id = os.environ.get("FRIDA_DEVICE")
+                self._device_id = os.environ.get("MIRU_DEVICE")
                 if self._device_id is None:
-                    self._host = os.environ.get("FRIDA_HOST")
-            self._certificate = options.certificate or os.environ.get("FRIDA_CERTIFICATE")
-            self._origin = options.origin or os.environ.get("FRIDA_ORIGIN")
-            self._token = options.token or os.environ.get("FRIDA_TOKEN")
+                    self._host = os.environ.get("MIRU_HOST")
+            self._certificate = options.certificate or os.environ.get("MIRU_CERTIFICATE")
+            self._origin = options.origin or os.environ.get("MIRU_ORIGIN")
+            self._token = options.token or os.environ.get("MIRU_TOKEN")
             self._keepalive_interval = options.keepalive_interval
             self._session_transport = options.session_transport
             self._stun_server = options.stun_server
@@ -241,7 +409,7 @@ class ConsoleApplication:
             target = getattr(options, "target", None)
             if target is None:
                 if len(options.args) < 1:
-                    parser.error("target must be specified")
+                    parser.error(self._ui("target must be specified", "ต้องระบุเป้าหมาย (target)"))
                 target = infer_target(options.args[0])
                 options.args.pop(0)
             target = expand_target(target)
@@ -261,7 +429,7 @@ class ConsoleApplication:
         return parser
 
     def _initialize_base_arguments_parser(self) -> argparse.ArgumentParser:
-        parser = argparse.ArgumentParser(usage=self._usage())
+        parser = argparse.ArgumentParser(usage=self._usage(), add_help=False, formatter_class=MiruHelpFormatter)
 
         if self._needs_device():
             self._add_device_arguments(parser)
@@ -270,49 +438,76 @@ class ConsoleApplication:
             self._add_target_arguments(parser)
 
         parser.add_argument(
-            "-O", "--options-file", help="text file containing additional command line options", metavar="FILE"
+            "-h",
+            "--help",
+            action="help",
+            help=self._ui("show this help message and exit", "แสดงข้อความช่วยเหลือนี้แล้วออก"),
         )
-        parser.add_argument("--version", action="version", version=frida.__version__)
+        parser.add_argument(
+            "-O",
+            "--options-file",
+            help=self._ui("text file containing additional command line options", "ไฟล์ข้อความที่มีตัวเลือกเพิ่มเติมของบรรทัดคำสั่ง"),
+            metavar="FILE",
+        )
+        parser.add_argument(
+            "--version",
+            action="version",
+            version=miru.__version__,
+            help=self._ui("show program's version number and exit", "แสดงเวอร์ชันของโปรแกรมแล้วออก"),
+        )
 
         return parser
 
     def _add_device_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
-            "-D", "--device", help="connect to device with the given ID", metavar="ID", dest="device_id"
+            "-D", "--device", help=self._ui("connect to device with the given ID", "เชื่อมต่อกับอุปกรณ์ตาม ID ที่ระบุ"), metavar="ID", dest="device_id"
         )
         parser.add_argument(
-            "-U", "--usb", help="connect to USB device", action="store_const", const="usb", dest="device_type"
+            "-U", "--usb", help=self._ui("connect to USB device", "เชื่อมต่อกับอุปกรณ์ผ่าน USB"), action="store_const", const="usb", dest="device_type"
         )
         parser.add_argument(
             "-R",
             "--remote",
-            help="connect to remote frida-server",
+            help=self._ui("connect to remote miru-server", "เชื่อมต่อกับ miru-server ระยะไกล"),
             action="store_const",
             const="remote",
             dest="device_type",
         )
-        parser.add_argument("-H", "--host", help="connect to remote frida-server on HOST")
-        parser.add_argument("--certificate", help="speak TLS with HOST, expecting CERTIFICATE")
-        parser.add_argument("--origin", help="connect to remote server with “Origin” header set to ORIGIN")
-        parser.add_argument("--token", help="authenticate with HOST using TOKEN")
+        parser.add_argument("-H", "--host", help=self._ui("connect to remote miru-server on HOST", "เชื่อมต่อกับ miru-server ระยะไกลที่ HOST"))
+        parser.add_argument("--certificate", help=self._ui("speak TLS with HOST, expecting CERTIFICATE", "ใช้ TLS กับ HOST โดยคาดหวัง CERTIFICATE"))
+        parser.add_argument(
+            "--origin",
+            help=self._ui(
+                "connect to remote server with 'Origin' header set to ORIGIN",
+                "เชื่อมต่อกับเซิร์ฟเวอร์ระยะไกลโดยตั้งค่าเฮดเดอร์ Origin เป็น ORIGIN",
+            ),
+        )
+        parser.add_argument("--token", help=self._ui("authenticate with HOST using TOKEN", "ยืนยันตัวตนกับ HOST ด้วย TOKEN"))
         parser.add_argument(
             "--keepalive-interval",
-            help="set keepalive interval in seconds, or 0 to disable (defaults to -1 to auto-select based on transport)",
+            help=self._ui(
+                "set keepalive interval in seconds, or 0 to disable (defaults to -1 to auto-select based on transport)",
+                "ตั้งค่า keepalive เป็นวินาที หรือ 0 เพื่อปิด (ค่าเริ่มต้น -1 ให้เลือกอัตโนมัติตาม transport)",
+            ),
             metavar="INTERVAL",
             type=int,
         )
         parser.add_argument(
             "--p2p",
-            help="establish a peer-to-peer connection with target",
+            help=self._ui("establish a peer-to-peer connection with target", "เชื่อมต่อแบบ peer-to-peer กับเป้าหมาย"),
             action="store_const",
             const="p2p",
             dest="session_transport",
             default="multiplexed",
         )
-        parser.add_argument("--stun-server", help="set STUN server ADDRESS to use with --p2p", metavar="ADDRESS")
+        parser.add_argument(
+            "--stun-server",
+            help=self._ui("set STUN server ADDRESS to use with --p2p", "ตั้งค่า STUN server เป็น ADDRESS สำหรับใช้กับ --p2p"),
+            metavar="ADDRESS",
+        )
         parser.add_argument(
             "--relay",
-            help="add relay to use with --p2p",
+            help=self._ui("add relay to use with --p2p", "เพิ่ม relay สำหรับใช้กับ --p2p"),
             metavar="address,username,password,turn-{udp,tcp,tls}",
             dest="relays",
             action="append",
@@ -320,11 +515,17 @@ class ConsoleApplication:
         )
 
     def _add_target_arguments(self, parser: argparse.ArgumentParser) -> None:
-        parser.add_argument("-f", "--file", help="spawn FILE", dest="target", type=create_target_parser("file"))
+        parser.add_argument(
+            "-f",
+            "--file",
+            help=self._ui("spawn FILE", "สั่ง spawn FILE"),
+            dest="target",
+            type=create_target_parser("file"),
+        )
         parser.add_argument(
             "-F",
             "--attach-frontmost",
-            help="attach to frontmost application",
+            help=self._ui("attach to frontmost application", "แนบ (attach) กับแอพที่อยู่หน้าสุด"),
             dest="target",
             action="store_const",
             const=("frontmost", None),
@@ -332,7 +533,7 @@ class ConsoleApplication:
         parser.add_argument(
             "-n",
             "--attach-name",
-            help="attach to NAME",
+            help=self._ui("attach to NAME", "แนบ (attach) กับ NAME"),
             metavar="NAME",
             dest="target",
             type=create_target_parser("name"),
@@ -340,56 +541,64 @@ class ConsoleApplication:
         parser.add_argument(
             "-N",
             "--attach-identifier",
-            help="attach to IDENTIFIER",
+            help=self._ui("attach to IDENTIFIER", "แนบ (attach) กับ IDENTIFIER"),
             metavar="IDENTIFIER",
             dest="target",
             type=create_target_parser("identifier"),
         )
         parser.add_argument(
-            "-p", "--attach-pid", help="attach to PID", metavar="PID", dest="target", type=create_target_parser("pid")
+            "-p",
+            "--attach-pid",
+            help=self._ui("attach to PID", "แนบ (attach) กับ PID"),
+            metavar="PID",
+            dest="target",
+            type=create_target_parser("pid"),
         )
         parser.add_argument(
             "-W",
             "--await",
-            help="await spawn matching PATTERN",
+            help=self._ui("await spawn matching PATTERN", "รอ spawn ที่ตรงกับ PATTERN"),
             metavar="PATTERN",
             dest="target",
             type=create_target_parser("gated"),
         )
         parser.add_argument(
             "--stdio",
-            help="stdio behavior when spawning (defaults to “inherit”)",
+            help=self._ui("stdio behavior when spawning (defaults to 'inherit')", "พฤติกรรม stdio ตอน spawn (ค่าเริ่มต้น 'inherit')"),
             choices=["inherit", "pipe"],
             default="inherit",
         )
         parser.add_argument(
             "--aux",
-            help="set aux option when spawning, such as “uid=(int)42” (supported types are: string, bool, int)",
+            help=self._ui(
+                "set aux option when spawning, such as 'uid=(int)42' (supported types are: string, bool, int)",
+                "ตั้งค่า aux option ตอน spawn เช่น 'uid=(int)42' (ชนิดที่รองรับ: string, bool, int)",
+            ),
             metavar="option",
             action="append",
             dest="aux",
             default=[],
         )
-        parser.add_argument("--realm", help="realm to attach in", choices=["native", "emulated"], default="native")
-        parser.add_argument("--runtime", help="script runtime to use", choices=["qjs", "v8"])
+        parser.add_argument("--realm", help=self._ui("realm to attach in", "realm ที่จะ attach"), choices=["native", "emulated"], default="native")
+        parser.add_argument("--runtime", help=self._ui("script runtime to use", "runtime ของสคริปต์ที่จะใช้"), choices=["qjs", "v8"])
         parser.add_argument(
             "--debug",
-            help="enable the Node.js compatible script debugger",
+            help=self._ui("enable the Node.js compatible script debugger", "เปิด debugger ของสคริปต์ที่เข้ากันได้กับ Node.js"),
             action="store_true",
             dest="enable_debugger",
             default=False,
         )
         parser.add_argument(
             "--squelch-crash",
-            help="if enabled, will not dump crash report to console",
+            help=self._ui("if enabled, will not dump crash report to console", "ถ้าเปิด จะไม่พิมพ์รายงาน crash ลงคอนโซล"),
             action="store_true",
             default=False,
         )
-        parser.add_argument("args", help="extra arguments and/or target", nargs="*")
+        parser.add_argument("args", help=self._ui("extra arguments and/or target", "อาร์กิวเมนต์เพิ่มเติม และ/หรือ เป้าหมาย"), nargs="*")
 
     def run(self) -> None:
         if self._needs_device():
-            mgr = frida.get_device_manager()
+            mgr = miru.get_device_manager()
 
             on_devices_changed = lambda: self._reactor.schedule(self._try_start)
             mgr.on("changed", on_devices_changed)
@@ -407,14 +616,14 @@ class ConsoleApplication:
         if self._started:
             try:
                 self._perform_on_background_thread(self._stop)
-            except frida.OperationCancelledError:
+            except miru.OperationCancelledError:
                 pass
 
         if self._session is not None:
             self._session.off("detached", self._schedule_on_session_detached)
             try:
                 self._perform_on_background_thread(self._session.detach)
-            except frida.OperationCancelledError:
+            except miru.OperationCancelledError:
                 pass
             self._session = None
 
@@ -425,7 +634,7 @@ class ConsoleApplication:
         if mgr is not None:
             mgr.off("changed", on_devices_changed)
 
-        frida.shutdown()
+        miru.shutdown()
         sys.exit(self._exit_status)
 
     def _respawn(self) -> None:
@@ -460,7 +669,7 @@ class ConsoleApplication:
         override this method if to add a custom usage message
         """
 
-        return "%(prog)s [options]"
+        return self._ui("%(prog)s [options]", "%(prog)s [ตัวเลือก]")
 
     def _needs_device(self) -> bool:
         """
@@ -506,12 +715,105 @@ class ConsoleApplication:
         self._exit_status = exit_status
         self._reactor.stop()
 
+    def _auto_install_server_enabled(self) -> bool:
+        value = os.environ.get("MIRU_AUTO_INSTALL_SERVER", "1").strip().lower()
+        return value not in ("0", "false", "no", "off")
+
+    def _get_server_port(self) -> int:
+        raw = (os.environ.get("MIRU_SERVER_PORT") or "27042").strip()
+        try:
+            port = int(raw)
+        except ValueError as e:
+            raise ValueError("MIRU_SERVER_PORT must be an integer") from e
+        if not (1 <= port <= 65535):
+            raise ValueError("MIRU_SERVER_PORT must be between 1 and 65535")
+        return port
+
+    def _looks_like_server_not_running_error(self, error: Exception) -> bool:
+        msg = str(error).lower()
+        if "unable to connect" in msg and "server" in msg:
+            return True
+        if "server not running" in msg:
+            return True
+        if "connection refused" in msg or "connection closed" in msg:
+            return True
+        return False
+
+    def _maybe_auto_install_android_server(self, error: Optional[Exception] = None) -> bool:
+        if self._device_type != "usb":
+            return False
+        if not self._auto_install_server_enabled():
+            return False
+        if getattr(self, "_auto_install_attempted", False):
+            return False
+        if error is not None and not self._looks_like_server_not_running_error(error):
+            return False
+
+        self._auto_install_attempted = True
+
+        try:
+            port = self._get_server_port()
+        except Exception as e:
+            self._update_status(
+                self._ui(
+                    f"Invalid MIRU_SERVER_PORT: {e}",
+                    f"MIRU_SERVER_PORT ไม่ถูกต้อง: {e}",
+                )
+            )
+            self._exit(1)
+            return False
+
+        try:
+            from miru_tools.android import ensure_android_server_running_via_adb
+
+            self._update_status(
+                self._ui(
+                    "Installing miru-server to Android device via adb...",
+                    "กำลังติดตั้ง miru-server ลง Android ผ่าน adb...",
+                )
+            )
+            ensure_android_server_running_via_adb(
+                version=miru.__version__,
+                port=port,
+                status_cb=self._update_status,
+            )
+        except Exception as e:
+            if "No Android device detected via adb" in str(e):
+                return False
+            self._update_status(
+                self._ui(
+                    f"Auto-install failed: {e}",
+                    f"ติดตั้งอัตโนมัติล้มเหลว: {e}",
+                )
+            )
+            self._exit(1)
+            return False
+
+        if self._device is None:
+            for delay in (0.0, 0.2, 0.5):
+                if delay:
+                    time.sleep(delay)
+                dev = find_device("usb")
+                if dev is not None:
+                    self._device = dev
+                    break
+
+        if self._device is not None:
+            for delay in (0.0, 0.2, 0.5):
+                try:
+                    self._device.enumerate_processes(scope="minimal")
+                    break
+                except Exception:
+                    time.sleep(delay)
+
+        return True
+
     def _try_start(self) -> None:
         if self._device is not None:
             return
         if self._device_id is not None:
             try:
-                self._device = frida.get_device(self._device_id)
+                self._device = miru.get_device(self._device_id)
             except:
                 self._update_status(f"Device '{self._device_id}' not found")
                 self._exit(1)
@@ -530,17 +832,27 @@ class ConsoleApplication:
                 options["keepalive_interval"] = self._keepalive_interval
 
             if host is None and len(options) == 0:
-                self._device = frida.get_remote_device()
+                self._device = miru.get_remote_device()
             else:
-                self._device = frida.get_device_manager().add_remote_device(
+                self._device = miru.get_device_manager().add_remote_device(
                     host if host is not None else "127.0.0.1", **options
                 )
         elif self._device_type is not None:
             self._device = find_device(self._device_type)
             if self._device is None:
+                if self._device_type == "usb":
+                    self._maybe_auto_install_android_server()
                 return
         else:
-            self._device = frida.get_local_device()
+            self._device = miru.get_local_device()
+
+        if self._device_type == "usb" and self._device is not None and not self._auto_install_attempted:
+            try:
+                self._device.enumerate_processes(scope="minimal")
+            except Exception as e:
+                self._maybe_auto_install_android_server(e)
+                if self._device is None:
+                    return
         self._on_device_found()
         self._device.on("output", self._schedule_on_output)
         self._device.on("lost", self._schedule_on_device_lost)
@@ -555,10 +867,13 @@ class ConsoleApplication:
                 try:
                     self._device.enable_spawn_gating()
                 except Exception as e:
-                    self._update_status(f"Failed to enable spawn gating: {e}")
+                    if self._maybe_auto_install_android_server(e):
+                        self._attach_and_instrument()
+                        return
+                    self._update_status(self._ui(f"Failed to enable spawn gating: {e}", f"เปิด spawn gating ไม่สำเร็จ: {e}"))
                     self._exit(1)
                     return
-                self._update_status("Waiting for spawn to appear...")
+                self._update_status(self._ui("Waiting for spawn to appear...", "กำลังรอ spawn ให้ปรากฏ..."))
                 return
 
             spawning = True
@@ -567,11 +882,18 @@ class ConsoleApplication:
                     try:
                         app = self._device.get_frontmost_application()
                     except Exception as e:
-                        self._update_status(f"Unable to get frontmost application on {self._device.name}: {e}")
+                        self._update_status(
+                            self._ui(
+                                f"Unable to get frontmost application on {self._device.name}: {e}",
+                                f"ไม่สามารถดึงแอพที่อยู่หน้าสุดบน {self._device.name}: {e}",
+                            )
+                        )
                         self._exit(1)
                         return
                     if app is None:
-                        self._update_status(f"No frontmost application on {self._device.name}")
+                        self._update_status(
+                            self._ui(f"No frontmost application on {self._device.name}", f"ไม่พบแอพที่อยู่หน้าสุดบน {self._device.name}")
+                        )
                         self._exit(1)
                         return
                     self._target = ("name", app.name)
@@ -584,16 +906,16 @@ class ConsoleApplication:
                     if len(matching) == 1 and matching[0].pid != 0:
                         attach_target = matching[0].pid
                     elif len(matching) > 1:
-                        raise frida.ProcessNotFoundError(
+                        raise miru.ProcessNotFoundError(
                             "ambiguous identifier; it matches: %s"
                             % ", ".join([f"{process.identifier} (pid: {process.pid})" for process in matching])
                         )
                     else:
-                        raise frida.ProcessNotFoundError("unable to find process with identifier '%s'" % target_value)
+                        raise miru.ProcessNotFoundError("unable to find process with identifier '%s'" % target_value)
                 elif target_type == "file":
                     argv = target_value
                     if not self._quiet:
-                        self._update_status(f"Spawning `{' '.join(argv)}`...")
+                        self._update_status(self._ui(f"Launching `{' '.join(argv)}`...", f"กำลังเรียกใช้ `{' '.join(argv)}`..."))
 
                     aux_kwargs = {}
                     if self._aux is not None:
@@ -607,17 +929,20 @@ class ConsoleApplication:
                     if not isinstance(attach_target, numbers.Number):
                         attach_target = self._device.get_process(attach_target).pid
                     if not self._quiet:
-                        self._update_status("Attaching...")
+                        self._update_status(self._ui("Attaching...", "กำลังแนบ (attach)..."))
                 spawning = False
                 self._attach(attach_target)
-            except frida.OperationCancelledError:
+            except miru.OperationCancelledError:
                 self._exit(0)
                 return
             except Exception as e:
+                if self._maybe_auto_install_android_server(e):
+                    self._attach_and_instrument()
+                    return
                 if spawning:
-                    self._update_status(f"Failed to spawn: {e}")
+                    self._update_status(self._ui(f"Failed to spawn: {e}", f"เริ่มโปรเซสไม่สำเร็จ: {e}"))
                 else:
-                    self._update_status(f"Failed to attach: {e}")
+                    self._update_status(self._ui(f"Failed to attach: {e}", f"แนบ (attach) ไม่สำเร็จ: {e}"))
                 self._exit(1)
                 return
         self._transition_to_started()
@@ -629,7 +954,7 @@ class ConsoleApplication:
     def _pick_worker_pid(self) -> int:
         try:
             frontmost = self._device.get_frontmost_application()
-            if frontmost is not None and frontmost.identifier == "re.frida.Gadget":
+            if frontmost is not None and frontmost.identifier == "re.miru.Gadget":
                 return frontmost.pid
         except:
             pass
@@ -650,7 +975,7 @@ class ConsoleApplication:
                 peer_options["relays"] = self._relays
             self._session.setup_peer_connection(**peer_options)
 
-    def _on_script_created(self, script: frida.core.Script) -> None:
+    def _on_script_created(self, script: miru.core.Script) -> None:
         if self._enable_debugger:
             script.enable_debugger()
             self._print("Chrome Inspector server listening on port 9229\n")
@@ -663,11 +988,11 @@ class ConsoleApplication:
         self._reactor.cancel_io()
         self._exit(0)
 
-    def _on_spawn_added(self, spawn: _frida.Spawn) -> None:
+    def _on_spawn_added(self, spawn: _miru.Spawn) -> None:
         thread = threading.Thread(target=self._handle_spawn, args=(spawn,))
         thread.start()
 
-    def _handle_spawn(self, spawn: _frida.Spawn) -> None:
+    def _handle_spawn(self, spawn: _miru.Spawn) -> None:
         pid = spawn.pid
 
         pattern = self._target[1]
@@ -692,12 +1017,12 @@ class ConsoleApplication:
             error = e
             self._reactor.schedule(lambda: self._on_spawn_unhandled(spawn, error))
 
-    def _on_spawn_handled(self, spawn: _frida.Spawn) -> None:
+    def _on_spawn_handled(self, spawn: _miru.Spawn) -> None:
         self._spawned_pid = spawn.pid
         self._start()
         self._started = True
 
-    def _on_spawn_unhandled(self, spawn: _frida.Spawn, error: Exception) -> None:
+    def _on_spawn_unhandled(self, spawn: _miru.Spawn, error: Exception) -> None:
         self._update_status(f"Failed to handle spawn: {error}")
         self._exit(1)
 
@@ -723,7 +1048,7 @@ class ConsoleApplication:
     def _on_device_lost(self) -> None:
         if self._exit_status is not None:
             return
-        self._print("Device disconnected.")
+        self._print(self._ui("Device disconnected.", "อุปกรณ์ตัดการเชื่อมต่อแล้ว"))
         self._exit(1)
 
     def _on_session_detached(self, reason: str, crash) -> None:
@@ -744,6 +1069,8 @@ class ConsoleApplication:
             print(colorama.Cursor.UP() + (80 * " "))
 
     def _update_status(self, message: str) -> None:
+        message = _sanitize_user_message(message)
+        message = self._encode_for_stdout(message)
         if self._have_terminal:
             if self._console_state == ConsoleState.STATUS:
                 cursor_position = colorama.Cursor.UP()
@@ -768,7 +1095,46 @@ class ConsoleApplication:
         print(*encoded_args, **kwargs)
         self._console_state = ConsoleState.TEXT
 
+    def _handle_java_bridge_log(self, level: str, text: str) -> bool:
+        del level
+        if not text.startswith("Miru Java Bridge:"):
+            return False
+
+        now = time.time()
+        if (not self._java_bridge_in_progress) and (now - self._java_bridge_last_done_at) < 1.0:
+            return True
+
+        fancy = self._have_terminal and not self._plain_terminal
+
+        if text == "Miru Java Bridge: Initializing...":
+            self._java_bridge_in_progress = True
+            if fancy:
+                self._update_status("Java bridge: initializing (1/3)")
+            else:
+                self._print("Java bridge: initializing")
+            return True
+
+        if text == "Miru Java Bridge: Assigned globalThis.Java":
+            self._java_bridge_in_progress = True
+            if fancy:
+                self._update_status("Java bridge: exporting Java (2/3)")
+            return True
+
+        if text == "Miru Java Bridge: Loaded.":
+            if fancy:
+                self._update_status("Java bridge: ready (3/3)")
+            else:
+                self._print("Java bridge: ready")
+            self._java_bridge_in_progress = False
+            self._java_bridge_last_done_at = now
+            return True
+
+        return False
+
     def _log(self, level: str, text: str) -> None:
+        text = _sanitize_user_message(text)
+        if self._handle_java_bridge_log(level, text):
+            return
         if level == "info":
             self._print(text)
         else:
@@ -837,48 +1203,48 @@ class ConsoleApplication:
 
         return result[0]
 
-    def _get_default_frida_dir(self) -> str:
-        return os.path.join(os.path.expanduser("~"), ".frida")
+    def _get_default_miru_dir(self) -> str:
+        return os.path.join(os.path.expanduser("~"), ".miru")
 
-    def _get_windows_frida_dir(self) -> str:
+    def _get_windows_miru_dir(self) -> str:
         appdata = os.environ["LOCALAPPDATA"]
-        return os.path.join(appdata, "frida")
+        return os.path.join(appdata, "miru")
 
     def _get_or_create_config_dir(self) -> str:
-        config_dir = os.path.join(self._get_default_frida_dir(), "config")
+        config_dir = os.path.join(self._get_default_miru_dir(), "config")
         if platform.system() == "Linux":
             xdg_config_home = os.getenv("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
-            config_dir = os.path.join(xdg_config_home, "frida")
+            config_dir = os.path.join(xdg_config_home, "miru")
         elif platform.system() == "Windows":
-            config_dir = os.path.join(self._get_windows_frida_dir(), "Config")
+            config_dir = os.path.join(self._get_windows_miru_dir(), "Config")
         if not os.path.exists(config_dir):
             os.makedirs(config_dir)
         return config_dir
 
     def _get_or_create_data_dir(self) -> str:
-        data_dir = os.path.join(self._get_default_frida_dir(), "data")
+        data_dir = os.path.join(self._get_default_miru_dir(), "data")
         if platform.system() == "Linux":
             xdg_data_home = os.getenv("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
-            data_dir = os.path.join(xdg_data_home, "frida")
+            data_dir = os.path.join(xdg_data_home, "miru")
         elif platform.system() == "Windows":
-            data_dir = os.path.join(self._get_windows_frida_dir(), "Data")
+            data_dir = os.path.join(self._get_windows_miru_dir(), "Data")
         if not os.path.exists(data_dir):
             os.makedirs(data_dir)
         return data_dir
 
     def _get_or_create_state_dir(self) -> str:
-        state_dir = os.path.join(self._get_default_frida_dir(), "state")
+        state_dir = os.path.join(self._get_default_miru_dir(), "state")
         if platform.system() == "Linux":
             xdg_state_home = os.getenv("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))
-            state_dir = os.path.join(xdg_state_home, "frida")
+            state_dir = os.path.join(xdg_state_home, "miru")
         elif platform.system() == "Windows":
             appdata = os.environ["LOCALAPPDATA"]
-            state_dir = os.path.join(appdata, "frida", "State")
+            state_dir = os.path.join(appdata, "miru", "State")
         if not os.path.exists(state_dir):
             os.makedirs(state_dir)
         return state_dir
 
-    def try_handle_bridge_request(self, message: Mapping[Any, Any], script: frida.core.Script) -> bool:
+    def try_handle_bridge_request(self, message: Mapping[Any, Any], script: miru.core.Script) -> bool:
         if message["type"] != "send":
             return False
 
@@ -887,15 +1253,26 @@ class ConsoleApplication:
             return False
 
         t = payload.get("type")
-        if t != "frida:load-bridge":
+        if t != "miru:load-bridge":
             return False
 
         stem = payload["name"].lower()
-        bridge = next(p for p in (Path(__file__).parent / "bridges").glob("*.js") if p.stem == stem)
+
+        bridge_dir = Path(__file__).parent / "bridges"
+        if not bridge_dir.is_dir():
+            bridge_dir = Path(__file__).parent.parent / "bridges"
+
+        bridge = bridge_dir / f"{stem}.js"
+        if not bridge.is_file():
+            matches = [p for p in bridge_dir.glob("*.js") if p.stem.lower() == stem]
+            if len(matches) == 0:
+                self._update_status(f"Failed to load bridge '{stem}': missing JS asset")
+                return False
+            bridge = matches[0]
 
         script.post(
             {
-                "type": "frida:bridge-loaded",
+                "type": "miru:bridge-loaded",
                 "filename": bridge.name,
                 "source": bridge.read_text(encoding="utf-8"),
             }
@@ -959,8 +1336,8 @@ def insert_options_file_args_in_list(args: List[str], offset: int, new_arg_text:
     return new_args_list
 
 
-def find_device(device_type: str) -> Optional[frida.core.Device]:
-    for device in frida.enumerate_devices():
+def find_device(device_type: str) -> Optional[miru.core.Device]:
+    for device in miru.enumerate_devices():
         if device.type == device_type:
             return device
     return None
@@ -997,7 +1374,7 @@ def expand_target(target: TargetTypeTuple) -> TargetTypeTuple:
 def parse_aux_option(option: str) -> Tuple[str, Union[str, bool, int]]:
     m = AUX_OPTION_PATTERN.match(option)
     if m is None:
-        raise ValueError("expected name=(type)value, e.g. “uid=(int)42”; supported types are: string, bool, int")
+        raise ValueError("expected name=(type)value, e.g. 'uid=(int)42'; supported types are: string, bool, int")
 
     name = m.group(1)
     type_decl = m.group(2)

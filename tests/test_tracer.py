@@ -3,10 +3,10 @@ import threading
 import time
 import unittest
 
-import frida
+import miru
 
-from frida_tools.reactor import Reactor
-from frida_tools.tracer import UI, MemoryRepository, Tracer, TracerProfileBuilder
+from miru_tools.reactor import Reactor
+from miru_tools.tracer import UI, MemoryRepository, Tracer, TracerProfileBuilder
 
 from .data import target_program
 
@@ -17,7 +17,7 @@ class TestTracer(unittest.TestCase):
         cls.target = subprocess.Popen([target_program], stdin=subprocess.PIPE)
         # TODO: improve injectors to handle injection into a process that hasn't yet finished initializing
         time.sleep(0.05)
-        cls.session = frida.attach(cls.target.pid)
+        cls.session = miru.attach(cls.target.pid)
 
     @classmethod
     def tearDownClass(cls):

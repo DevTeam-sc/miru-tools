@@ -1,9 +1,9 @@
 import argparse
 from typing import List
 
-import frida
+import miru
 
-from frida_tools.application import ConsoleApplication, expand_target, infer_target
+from miru_tools.application import ConsoleApplication, expand_target, infer_target
 
 
 class KillApplication(ConsoleApplication):
@@ -24,7 +24,7 @@ class KillApplication(ConsoleApplication):
         try:
             assert self._device is not None
             self._device.kill(self._process)
-        except frida.ProcessNotFoundError:
+        except miru.ProcessNotFoundError:
             self._update_status(f"unable to find process: {self._process}")
             self._exit(1)
         self._exit(0)

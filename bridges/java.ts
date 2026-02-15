@@ -1,3 +1,3 @@
-import Java from "frida-java-bridge";
+import Java from "miru-java-bridge";
 
 export default Java;

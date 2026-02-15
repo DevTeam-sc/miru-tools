@@ -1,9 +1,10 @@
+/// <reference path="./shims.d.ts" />
 import {
     TraceBuffer,
     TraceBufferReader,
     TraceSession,
     TraceStrategy,
-} from "frida-itrace";
+} from "miru-itrace";
 
 type RawTraceStrategy = RawTraceThreadStrategy | RawTraceRangeStrategy;
 type RawTraceThreadStrategy = ["thread", ["id", number] | ["index", number]];

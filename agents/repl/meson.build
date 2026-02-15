@@ -17,5 +17,5 @@ custom_target('repl-agent.js',
     '@PRIVATE_DIR@',
   ],
   install: true,
-  install_dir: python.get_install_dir() / 'frida_tools',
+  install_dir: python.get_install_dir() / 'miru_tools',
 )
