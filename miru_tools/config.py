@@ -43,4 +43,3 @@ def write_setting(name: str, value: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(value.strip() + "\n", encoding="utf-8")
     return path
-

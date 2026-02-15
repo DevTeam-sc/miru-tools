@@ -1,7 +1,6 @@
 import os
 import subprocess
 import time
-from pathlib import Path
 from typing import Callable, List, Optional
 
 from miru_tools.assets import AssetsError, ensure_asset_cached, load_manifest, select_asset
@@ -155,5 +154,3 @@ def ensure_android_server_running_via_adb(
     ps_out = _run_adb(adb, serial, ["shell", "ps", "-A"], check=False, timeout_s=30).stdout
     if "miru-server" not in (ps_out or ""):
         raise AdbError("miru-server did not start (pidof empty)")
-
-

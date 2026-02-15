@@ -1,7 +1,6 @@
 import argparse
 import codecs
 import errno
-import locale
 import numbers
 import os
 import platform
@@ -446,7 +445,10 @@ class ConsoleApplication:
         parser.add_argument(
             "-O",
             "--options-file",
-            help=self._ui("text file containing additional command line options", "ไฟล์ข้อความที่มีตัวเลือกเพิ่มเติมของบรรทัดคำสั่ง"),
+            help=self._ui(
+                "text file containing additional command line options",
+                "ไฟล์ข้อความที่มีตัวเลือกเพิ่มเติมของบรรทัดคำสั่ง",
+            ),
             metavar="FILE",
         )
         parser.add_argument(
@@ -460,10 +462,19 @@ class ConsoleApplication:
 
     def _add_device_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
-            "-D", "--device", help=self._ui("connect to device with the given ID", "เชื่อมต่อกับอุปกรณ์ตาม ID ที่ระบุ"), metavar="ID", dest="device_id"
+            "-D",
+            "--device",
+            help=self._ui("connect to device with the given ID", "เชื่อมต่อกับอุปกรณ์ตาม ID ที่ระบุ"),
+            metavar="ID",
+            dest="device_id",
         )
         parser.add_argument(
-            "-U", "--usb", help=self._ui("connect to USB device", "เชื่อมต่อกับอุปกรณ์ผ่าน USB"), action="store_const", const="usb", dest="device_type"
+            "-U",
+            "--usb",
+            help=self._ui("connect to USB device", "เชื่อมต่อกับอุปกรณ์ผ่าน USB"),
+            action="store_const",
+            const="usb",
+            dest="device_type",
         )
         parser.add_argument(
             "-R",
@@ -473,8 +484,15 @@ class ConsoleApplication:
             const="remote",
             dest="device_type",
         )
-        parser.add_argument("-H", "--host", help=self._ui("connect to remote miru-server on HOST", "เชื่อมต่อกับ miru-server ระยะไกลที่ HOST"))
-        parser.add_argument("--certificate", help=self._ui("speak TLS with HOST, expecting CERTIFICATE", "ใช้ TLS กับ HOST โดยคาดหวัง CERTIFICATE"))
+        parser.add_argument(
+            "-H",
+            "--host",
+            help=self._ui("connect to remote miru-server on HOST", "เชื่อมต่อกับ miru-server ระยะไกลที่ HOST"),
+        )
+        parser.add_argument(
+            "--certificate",
+            help=self._ui("speak TLS with HOST, expecting CERTIFICATE", "ใช้ TLS กับ HOST โดยคาดหวัง CERTIFICATE"),
+        )
         parser.add_argument(
             "--origin",
             help=self._ui(
@@ -482,7 +500,9 @@ class ConsoleApplication:
                 "เชื่อมต่อกับเซิร์ฟเวอร์ระยะไกลโดยตั้งค่าเฮดเดอร์ Origin เป็น ORIGIN",
             ),
         )
-        parser.add_argument("--token", help=self._ui("authenticate with HOST using TOKEN", "ยืนยันตัวตนกับ HOST ด้วย TOKEN"))
+        parser.add_argument(
+            "--token", help=self._ui("authenticate with HOST using TOKEN", "ยืนยันตัวตนกับ HOST ด้วย TOKEN")
+        )
         parser.add_argument(
             "--keepalive-interval",
             help=self._ui(
@@ -502,7 +522,9 @@ class ConsoleApplication:
         )
         parser.add_argument(
             "--stun-server",
-            help=self._ui("set STUN server ADDRESS to use with --p2p", "ตั้งค่า STUN server เป็น ADDRESS สำหรับใช้กับ --p2p"),
+            help=self._ui(
+                "set STUN server ADDRESS to use with --p2p", "ตั้งค่า STUN server เป็น ADDRESS สำหรับใช้กับ --p2p"
+            ),
             metavar="ADDRESS",
         )
         parser.add_argument(
@@ -564,7 +586,10 @@ class ConsoleApplication:
         )
         parser.add_argument(
             "--stdio",
-            help=self._ui("stdio behavior when spawning (defaults to 'inherit')", "พฤติกรรม stdio ตอน spawn (ค่าเริ่มต้น 'inherit')"),
+            help=self._ui(
+                "stdio behavior when spawning (defaults to 'inherit')",
+                "พฤติกรรม stdio ตอน spawn (ค่าเริ่มต้น 'inherit')",
+            ),
             choices=["inherit", "pipe"],
             default="inherit",
         )
@@ -579,22 +604,35 @@ class ConsoleApplication:
             dest="aux",
             default=[],
         )
-        parser.add_argument("--realm", help=self._ui("realm to attach in", "realm ที่จะ attach"), choices=["native", "emulated"], default="native")
-        parser.add_argument("--runtime", help=self._ui("script runtime to use", "runtime ของสคริปต์ที่จะใช้"), choices=["qjs", "v8"])
+        parser.add_argument(
+            "--realm",
+            help=self._ui("realm to attach in", "realm ที่จะ attach"),
+            choices=["native", "emulated"],
+            default="native",
+        )
+        parser.add_argument(
+            "--runtime", help=self._ui("script runtime to use", "runtime ของสคริปต์ที่จะใช้"), choices=["qjs", "v8"]
+        )
         parser.add_argument(
             "--debug",
-            help=self._ui("enable the Node.js compatible script debugger", "เปิด debugger ของสคริปต์ที่เข้ากันได้กับ Node.js"),
+            help=self._ui(
+                "enable the Node.js compatible script debugger", "เปิด debugger ของสคริปต์ที่เข้ากันได้กับ Node.js"
+            ),
             action="store_true",
             dest="enable_debugger",
             default=False,
         )
         parser.add_argument(
             "--squelch-crash",
-            help=self._ui("if enabled, will not dump crash report to console", "ถ้าเปิด จะไม่พิมพ์รายงาน crash ลงคอนโซล"),
+            help=self._ui(
+                "if enabled, will not dump crash report to console", "ถ้าเปิด จะไม่พิมพ์รายงาน crash ลงคอนโซล"
+            ),
             action="store_true",
             default=False,
         )
-        parser.add_argument("args", help=self._ui("extra arguments and/or target", "อาร์กิวเมนต์เพิ่มเติม และ/หรือ เป้าหมาย"), nargs="*")
+        parser.add_argument(
+            "args", help=self._ui("extra arguments and/or target", "อาร์กิวเมนต์เพิ่มเติม และ/หรือ เป้าหมาย"), nargs="*"
+        )
 
     def run(self) -> None:
         if self._needs_device():
@@ -870,7 +908,9 @@ class ConsoleApplication:
                     if self._maybe_auto_install_android_server(e):
                         self._attach_and_instrument()
                         return
-                    self._update_status(self._ui(f"Failed to enable spawn gating: {e}", f"เปิด spawn gating ไม่สำเร็จ: {e}"))
+                    self._update_status(
+                        self._ui(f"Failed to enable spawn gating: {e}", f"เปิด spawn gating ไม่สำเร็จ: {e}")
+                    )
                     self._exit(1)
                     return
                 self._update_status(self._ui("Waiting for spawn to appear...", "กำลังรอ spawn ให้ปรากฏ..."))
@@ -892,7 +932,10 @@ class ConsoleApplication:
                         return
                     if app is None:
                         self._update_status(
-                            self._ui(f"No frontmost application on {self._device.name}", f"ไม่พบแอพที่อยู่หน้าสุดบน {self._device.name}")
+                            self._ui(
+                                f"No frontmost application on {self._device.name}",
+                                f"ไม่พบแอพที่อยู่หน้าสุดบน {self._device.name}",
+                            )
                         )
                         self._exit(1)
                         return
@@ -915,7 +958,9 @@ class ConsoleApplication:
                 elif target_type == "file":
                     argv = target_value
                     if not self._quiet:
-                        self._update_status(self._ui(f"Launching `{' '.join(argv)}`...", f"กำลังเรียกใช้ `{' '.join(argv)}`..."))
+                        self._update_status(
+                            self._ui(f"Launching `{' '.join(argv)}`...", f"กำลังเรียกใช้ `{' '.join(argv)}`...")
+                        )
 
                     aux_kwargs = {}
                     if self._aux is not None:

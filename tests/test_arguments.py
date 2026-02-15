@@ -179,4 +179,3 @@ class KillParsingTestCase(unittest.TestCase):
     def test_passing_file(self):
         with self.assertRaises(SystemExit):
             KillApplication(args=["./file"])
-

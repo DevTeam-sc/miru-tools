@@ -4,11 +4,8 @@ import hashlib
 import json
 import os
 import platform
-import re
 import shlex
 import signal
-import string
-import sys
 import threading
 import time
 from pathlib import Path
@@ -185,7 +182,13 @@ class REPLApplication(ConsoleApplication):
 
     def _add_options(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
-            "-l", "--load", help=self._ui("load SCRIPT", "โหลด SCRIPT"), metavar="SCRIPT", dest="user_scripts", action="append", default=[]
+            "-l",
+            "--load",
+            help=self._ui("load SCRIPT", "โหลด SCRIPT"),
+            metavar="SCRIPT",
+            dest="user_scripts",
+            action="append",
+            default=[],
         )
         parser.add_argument(
             "-P",
@@ -205,12 +208,25 @@ class REPLApplication(ConsoleApplication):
             default="any",
         )
         parser.add_argument(
-            "-c", "--codeshare", help=self._ui("load CODESHARE_URI", "โหลด CODESHARE_URI"), metavar="CODESHARE_URI", dest="codeshare_uri"
+            "-c",
+            "--codeshare",
+            help=self._ui("load CODESHARE_URI", "โหลด CODESHARE_URI"),
+            metavar="CODESHARE_URI",
+            dest="codeshare_uri",
         )
-        parser.add_argument("-e", "--eval", help=self._ui("evaluate CODE", "ประเมิน (eval) CODE"), metavar="CODE", action="append", dest="eval_items")
+        parser.add_argument(
+            "-e",
+            "--eval",
+            help=self._ui("evaluate CODE", "ประเมิน (eval) CODE"),
+            metavar="CODE",
+            action="append",
+            dest="eval_items",
+        )
         parser.add_argument(
             "-q",
-            help=self._ui("quiet mode (no prompt) and quit after -l and -e", "โหมดเงียบ (ไม่มีพรอมต์) และออกหลังจาก -l และ -e"),
+            help=self._ui(
+                "quiet mode (no prompt) and quit after -l and -e", "โหมดเงียบ (ไม่มีพรอมต์) และออกหลังจาก -l และ -e"
+            ),
             action="store_true",
             dest="quiet",
             default=False,
@@ -233,7 +249,9 @@ class REPLApplication(ConsoleApplication):
             dest="on_spawn_complete",
             default="resume",
         )
-        parser.add_argument("-o", "--output", help=self._ui("output to log file", "เขียน output ลงไฟล์ log"), dest="logfile")
+        parser.add_argument(
+            "-o", "--output", help=self._ui("output to log file", "เขียน output ลงไฟล์ log"), dest="logfile"
+        )
         parser.add_argument(
             "--eternalize",
             help=self._ui("eternalize the script before exit", "ทำให้สคริปต์คงอยู่ (eternalize) ก่อนออก"),
@@ -277,7 +295,9 @@ class REPLApplication(ConsoleApplication):
         )
         parser.add_argument(
             "--no-auto-reload",
-            help=self._ui("Disable auto reload of provided scripts and c module", "ปิด auto reload ของสคริปต์และ c module"),
+            help=self._ui(
+                "Disable auto reload of provided scripts and c module", "ปิด auto reload ของสคริปต์และ c module"
+            ),
             action="store_false",
             dest="autoreload",
             default=True,
@@ -595,7 +615,7 @@ class REPLApplication(ConsoleApplication):
     def _exec_and_print(self, exec: Callable[[T], Tuple[str, bytes]], arg: T) -> bool:
         success = False
         try:
-            (t, value) = self._perform_on_reactor_thread(lambda: exec(arg))
+            t, value = self._perform_on_reactor_thread(lambda: exec(arg))
             if t in ("function", "undefined", "null"):
                 output = t
             elif t == "binary":
@@ -661,7 +681,7 @@ class REPLApplication(ConsoleApplication):
             expression = expression[:-2] + "?"
 
         obj_to_identify = [x for x in expression.split(" ") if x.endswith("?")][0][:-1]
-        (obj_type, obj_value) = self._evaluate_expression(obj_to_identify)
+        obj_type, obj_value = self._evaluate_expression(obj_to_identify)
 
         if obj_type == "function":
             signature = self._evaluate_expression("%s.toString()" % obj_to_identify)[1].decode()
@@ -934,9 +954,7 @@ class REPLApplication(ConsoleApplication):
         name = os.path.basename(self._user_cmodule)
 
         return (
-            """static void miru_log (const char * format, ...);\n#line 1 "{name}"\n""".format(name=name)
-            + source
-            + """\
+            """static void miru_log (const char * format, ...);\n#line 1 "{name}"\n""".format(name=name) + source + """\
 #line 1 "miru-repl-builtins.c"
 #include <glib.h>
 
@@ -1251,7 +1269,7 @@ class MiruCompleter(Completer):
         # the user typing more characters while we are evaluating the expression
         while True:
             try:
-                (t, value) = self._repl._evaluate_expression(code)
+                t, value = self._repl._evaluate_expression(code)
                 if t == "object":
                     return value
                 return []

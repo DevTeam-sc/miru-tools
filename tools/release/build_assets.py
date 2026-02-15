@@ -5,7 +5,6 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-
 MANIFEST_FILENAME = "miru-assets-manifest.json"
 HASHES_FILENAME = "hashes.sha256.txt"
 
@@ -65,7 +64,9 @@ def _parse_android_spec(raw: str) -> Tuple[Path, str]:
     return builddir, arch
 
 
-def _add_android_assets(manifest: Dict[str, Any], hashes: List[str], *, builddir: Path, arch: str, outdir: Path) -> None:
+def _add_android_assets(
+    manifest: Dict[str, Any], hashes: List[str], *, builddir: Path, arch: str, outdir: Path
+) -> None:
     # Android server
     server_src = builddir / "subprojects" / "miru-core" / "server" / "miru-server"
     server_name = f"miru-server-android-{arch}"
@@ -143,4 +144,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
